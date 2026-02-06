@@ -17,8 +17,9 @@ import {
   Sun,
   X,
   PanelLeft,
+  RefreshCw,
 } from 'lucide-react';
-import { useTheme } from '@/components/theme/ThemeProvider';
+import { useTheme } from '@/components/theme/useTheme';
 import { NewProjectDialog } from './NewProjectDialog';
 import { Logo } from './Logo';
 import type { SidebarProps, Project, Session, SessionStatus } from './types';
@@ -29,6 +30,50 @@ const statusConfig: Record<SessionStatus, { icon: React.ReactNode; color: string
   error: { icon: <AlertCircle className="w-3 h-3" />, color: 'text-red-400', label: 'Error' },
   stalled: { icon: <Clock className="w-3 h-3" />, color: 'text-amber-400', label: 'Stalled' },
 };
+
+interface DateGroup {
+  label: string;
+  sessions: Session[];
+}
+
+function groupSessionsByDate(sessions: Session[]): DateGroup[] {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterday = new Date(today.getTime() - 86400000);
+  const last7Days = new Date(today.getTime() - 7 * 86400000);
+  const last30Days = new Date(today.getTime() - 30 * 86400000);
+
+  const groups: Record<string, Session[]> = {
+    Today: [],
+    Yesterday: [],
+    'Last 7 days': [],
+    'Last 30 days': [],
+    Older: [],
+  };
+
+  const sorted = [...sessions].sort(
+    (a, b) => b.updatedAt.getTime() - a.updatedAt.getTime()
+  );
+
+  for (const session of sorted) {
+    const date = session.updatedAt;
+    if (date >= today) {
+      groups['Today'].push(session);
+    } else if (date >= yesterday) {
+      groups['Yesterday'].push(session);
+    } else if (date >= last7Days) {
+      groups['Last 7 days'].push(session);
+    } else if (date >= last30Days) {
+      groups['Last 30 days'].push(session);
+    } else {
+      groups['Older'].push(session);
+    }
+  }
+
+  return Object.entries(groups)
+    .filter(([, sessions]) => sessions.length > 0)
+    .map(([label, sessions]) => ({ label, sessions }));
+}
 
 function SessionItem({
   session,
@@ -143,27 +188,109 @@ function SessionItem({
 
 function ProjectFolder({
   project,
-  activeSessionId,
+  activeSessionPath,
   onSessionSelect,
   onNewSession,
   onRenameProject,
   onRenameSession,
   onDeleteProject,
   onDeleteSession,
+  onLoadSessions,
+  isCreatingSession,
 }: {
   project: Project;
-  activeSessionId?: string;
-  onSessionSelect: (sessionId: string) => void;
+  activeSessionPath?: string;
+  onSessionSelect: (sessionPath: string) => void;
   onNewSession: () => void;
   onRenameProject?: (name: string) => void;
-  onRenameSession?: (sessionId: string, name: string) => void;
+  onRenameSession?: (sessionPath: string, name: string) => void;
   onDeleteProject?: () => void;
-  onDeleteSession?: (sessionId: string) => void;
+  onDeleteSession?: (sessionPath: string) => void;
+  onLoadSessions?: (limit: number, offset: number) => Promise<{ sessions: Session[]; total: number; hasMore: boolean }>;
+  isCreatingSession?: boolean;
 }) {
-  const [isExpanded, setIsExpanded] = useState(true);
+  const hasActiveSession = project.sessions.some((s) => s.sessionPath === activeSessionPath);
+  const [isExpanded, setIsExpanded] = useState(hasActiveSession);
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(project.name);
   const [showActions, setShowActions] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [sessionsLoaded, setSessionsLoaded] = useState(project.sessions.length > 0);
+  const [totalSessions, setTotalSessions] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+
+  // Auto-expand if this project contains the active session
+  useEffect(() => {
+    if (hasActiveSession && !isExpanded) {
+      setIsExpanded(true);
+    }
+  }, [hasActiveSession]);
+
+  // Update sessionsLoaded when sessions change externally
+  useEffect(() => {
+    if (project.sessions.length > 0) {
+      setSessionsLoaded(true);
+    }
+  }, [project.sessions.length]);
+  const [currentOffset, setCurrentOffset] = useState(0);
+  const PAGE_SIZE = 10;
+
+  const dateGroups = useMemo(() => groupSessionsByDate(project.sessions), [project.sessions]);
+
+  const handleExpand = useCallback(async () => {
+    const newExpanded = !isExpanded;
+    setIsExpanded(newExpanded);
+
+    if (!newExpanded) return;
+    if (sessionsLoaded || isLoading || !onLoadSessions) return;
+
+    setIsLoading(true);
+    try {
+      const result = await onLoadSessions(PAGE_SIZE, 0);
+      setSessionsLoaded(true);
+      setTotalSessions(result.total);
+      setHasMore(result.hasMore);
+      setCurrentOffset(result.sessions.length);
+    } catch (err) {
+      console.error('Failed to load sessions:', err);
+      setSessionsLoaded(false);
+      setHasMore(false);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [isExpanded, sessionsLoaded, onLoadSessions, isLoading]);
+
+  const handleLoadMore = useCallback(async () => {
+    if (!onLoadSessions || !hasMore || isLoading) return;
+
+    setIsLoading(true);
+    try {
+      const result = await onLoadSessions(PAGE_SIZE, currentOffset);
+      setHasMore(result.hasMore);
+      setCurrentOffset(prev => prev + result.sessions.length);
+    } catch (err) {
+      console.error('Failed to load more sessions:', err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [onLoadSessions, currentOffset, hasMore, isLoading]);
+
+  const handleRefreshSessions = useCallback(async () => {
+    if (!onLoadSessions || isLoading) return;
+
+    setIsLoading(true);
+    try {
+      const result = await onLoadSessions(PAGE_SIZE, 0);
+      setSessionsLoaded(true);
+      setTotalSessions(result.total);
+      setHasMore(result.hasMore);
+      setCurrentOffset(result.sessions.length);
+    } catch (err) {
+      console.error('Failed to refresh sessions:', err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [onLoadSessions, isLoading]);
 
   const handleRename = useCallback(() => {
     if (editName.trim() && editName !== project.name) {
@@ -180,8 +307,6 @@ function ProjectFolder({
     }
   };
 
-  const hasActiveSession = project.sessions.some((s) => s.id === activeSessionId);
-
   return (
     <div className="mb-0.5">
       <div
@@ -195,7 +320,7 @@ function ProjectFolder({
         )}
       >
         <button
-          onClick={() => setIsExpanded(!isExpanded)}
+          onClick={handleExpand}
           className="p-0.5 hover:bg-white/10 rounded transition-colors"
         >
           <ChevronRight
@@ -228,16 +353,33 @@ function ProjectFolder({
         {!isEditing && (
           <div className={cn(
             'flex items-center gap-0.5 transition-opacity',
-            showActions ? 'opacity-100' : 'opacity-0'
+            showActions || isCreatingSession ? 'opacity-100' : 'opacity-0'
           )}>
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                onNewSession();
+                void handleRefreshSessions();
               }}
+              disabled={!onLoadSessions || isLoading}
+              className="p-1 rounded hover:bg-white/10 text-neutral-500 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Refresh sessions"
+              aria-label="Refresh sessions"
+            >
+              <RefreshCw className={cn('w-3.5 h-3.5', isLoading && 'animate-spin')} />
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (!isCreatingSession) onNewSession();
+              }}
+              disabled={isCreatingSession}
               className="p-1 rounded hover:bg-white/10 text-neutral-500 hover:text-white transition-colors"
             >
-              <Plus className="w-3.5 h-3.5" />
+              {isCreatingSession ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Plus className="w-3.5 h-3.5" />
+              )}
             </button>
             <button
               onClick={(e) => {
@@ -271,21 +413,51 @@ function ProjectFolder({
       >
         <div className="overflow-hidden">
           <div className="border-l border-neutral-800 ml-5 mt-0.5">
-            {project.sessions.length === 0 ? (
+            {isLoading && project.sessions.length === 0 ? (
+              <div className="space-y-1 py-1 animate-pulse">
+                {[1, 2, 3].map((i) => (
+                  <div key={i} className="h-7 bg-neutral-800/50 rounded mx-1" />
+                ))}
+              </div>
+            ) : project.sessions.length === 0 && !isCreatingSession ? (
               <div className="px-3 py-2 text-xs text-neutral-600 italic">
                 No sessions
               </div>
             ) : (
-              project.sessions.map((session) => (
-                <SessionItem
-                  key={session.id}
-                  session={session}
-                  isActive={session.id === activeSessionId}
-                  onClick={() => onSessionSelect(session.id)}
-                  onRename={(name) => onRenameSession?.(session.id, name)}
-                  onDelete={() => onDeleteSession?.(session.id)}
-                />
-              ))
+              <>
+                {dateGroups.map((group) => (
+                  <div key={group.label}>
+                    <div className="px-3 pt-2 pb-1">
+                      <span className="text-[10px] font-medium uppercase tracking-wider text-neutral-600">
+                        {group.label}
+                      </span>
+                    </div>
+                    {group.sessions.map((session) => (
+                      <SessionItem
+                        key={session.sessionPath}
+                        session={session}
+                        isActive={session.sessionPath === activeSessionPath}
+                        onClick={() => onSessionSelect(session.sessionPath)}
+                        onRename={(name) => onRenameSession?.(session.sessionPath, name)}
+                        onDelete={() => onDeleteSession?.(session.sessionPath)}
+                      />
+                    ))}
+                  </div>
+                ))}
+                {(hasMore || isLoading) && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleLoadMore();
+                    }}
+                    disabled={isLoading}
+                    className="w-full px-3 py-1.5 text-[11px] text-neutral-500 hover:text-neutral-300 hover:bg-white/5 rounded transition-colors text-center disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    {isLoading && <Loader2 className="w-3 h-3 animate-spin" />}
+                    {isLoading ? 'Loading...' : `+${totalSessions - project.sessions.length} more`}
+                  </button>
+                )}
+              </>
             )}
           </div>
         </div>
@@ -294,9 +466,24 @@ function ProjectFolder({
   );
 }
 
+const PROJECTS_PER_PAGE = 10;
+
+function ProjectsShimmer() {
+  return (
+    <div className="space-y-2 px-2 animate-pulse">
+      {[1, 2, 3].map((i) => (
+        <div key={i} className="flex items-center gap-2 px-2 py-2">
+          <div className="w-4 h-4 bg-neutral-800 rounded" />
+          <div className="h-4 bg-neutral-800 rounded flex-1" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function Sidebar({
   projects,
-  activeSessionId,
+  activeSessionPath,
   isOpen = true,
   onClose,
   collapsed = false,
@@ -308,15 +495,23 @@ export function Sidebar({
   onRenameSession,
   onDeleteProject,
   onDeleteSession,
+  onLoadProjectSessions,
+  creatingSessionInProject,
+  isLoadingProjects = false,
 }: SidebarProps) {
   const { theme, toggleTheme } = useTheme();
   const [searchQuery, setSearchQuery] = useState('');
   const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(PROJECTS_PER_PAGE);
+
+  const sortedProjects = useMemo(() => {
+    return [...projects].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+  }, [projects]);
 
   const filteredProjects = useMemo(() => {
-    if (!searchQuery.trim()) return projects;
+    if (!searchQuery.trim()) return sortedProjects;
     const query = searchQuery.toLowerCase();
-    return projects
+    return sortedProjects
       .map((p) => ({
         ...p,
         sessions: p.sessions.filter((s) =>
@@ -327,7 +522,18 @@ export function Sidebar({
         (p) =>
           p.name.toLowerCase().includes(query) || p.sessions.length > 0
       );
-  }, [projects, searchQuery]);
+  }, [sortedProjects, searchQuery]);
+
+  const displayedProjects = useMemo(() => {
+    return filteredProjects.slice(0, visibleCount);
+  }, [filteredProjects, visibleCount]);
+
+  const hasMore = filteredProjects.length > visibleCount;
+
+  // Reset visible count when search changes
+  useEffect(() => {
+    setVisibleCount(PROJECTS_PER_PAGE);
+  }, [searchQuery]);
 
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
@@ -363,7 +569,7 @@ export function Sidebar({
         <div className={cn('border-b border-white/5 flex-shrink-0', collapsed ? 'p-1.5' : 'p-3')}>
           <div className={cn('flex items-center', collapsed ? 'flex-col gap-1.5' : 'justify-between mb-3')}>
             {/* Logo */}
-            <div className="flex items-center gap-2 overflow-hidden">
+            <Link to="/" className="flex items-center gap-2 overflow-hidden hover:opacity-80 transition-opacity">
               <div className="w-7 h-7 rounded-lg bg-white flex items-center justify-center shrink-0">
                 <Logo className="w-5 h-5 text-black" />
               </div>
@@ -372,7 +578,7 @@ export function Sidebar({
                   Chats
                 </span>
               )}
-            </div>
+            </Link>
 
             {/* Header Actions */}
             <div className="flex items-center gap-0.5">
@@ -445,7 +651,10 @@ export function Sidebar({
 
         {/* Projects List */}
         <div className="flex-1 overflow-y-auto overflow-x-hidden py-2">
-          {collapsed ? (
+          {isLoadingProjects ? (
+            // Loading State
+            <ProjectsShimmer />
+          ) : collapsed ? (
             // Collapsed View - Compact Icons
             projects.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-40">
@@ -454,14 +663,14 @@ export function Sidebar({
             ) : (
               <div className="space-y-0.5 px-1">
                 {projects.map((project) => {
-                  const hasActiveSession = project.sessions.some((s) => s.id === activeSessionId);
+                  const hasActiveSession = project.sessions.some((s) => s.sessionPath === activeSessionPath);
                   return (
                     <button
                       key={project.id}
                       onClick={() => {
-                        const session = project.sessions.find((s) => s.id === activeSessionId) || project.sessions[0];
+                        const session = project.sessions.find((s) => s.sessionPath === activeSessionPath) || project.sessions[0];
                         if (session) {
-                          onSessionSelect(project.id, session.id);
+                          onSessionSelect(project.id, session.sessionPath);
                         } else {
                           onNewSession(project.id);
                         }
@@ -500,11 +709,11 @@ export function Sidebar({
           ) : (
             // Project List
             <div className="space-y-0.5">
-              {filteredProjects.map((project) => (
+              {displayedProjects.map((project) => (
                 <ProjectFolder
                   key={project.id}
                   project={project}
-                  activeSessionId={activeSessionId}
+                  activeSessionPath={activeSessionPath}
                   onSessionSelect={(sessionId) =>
                     onSessionSelect(project.id, sessionId)
                   }
@@ -515,8 +724,18 @@ export function Sidebar({
                   onRenameSession={onRenameSession}
                   onDeleteProject={() => onDeleteProject?.(project.id)}
                   onDeleteSession={onDeleteSession}
+                  onLoadSessions={onLoadProjectSessions ? (limit, offset) => onLoadProjectSessions(project.id, limit, offset) : undefined}
+                  isCreatingSession={creatingSessionInProject === project.id}
                 />
               ))}
+              {hasMore && (
+                <button
+                  onClick={() => setVisibleCount(prev => prev + PROJECTS_PER_PAGE)}
+                  className="w-full px-3 py-2 text-xs text-neutral-500 hover:text-neutral-300 hover:bg-white/5 rounded-lg transition-colors text-center"
+                >
+                  Load more ({filteredProjects.length - visibleCount} remaining)
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -557,4 +776,4 @@ export function Sidebar({
   );
 }
 
-export * from './types';
+export type { SessionStatus, ProjectMode, Session, Project, SidebarProps } from './types';

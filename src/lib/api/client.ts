@@ -60,6 +60,13 @@ export interface Model {
   };
 }
 
+export interface PackageUpdate {
+  name: string;
+  currentVersion: string | null;
+  latestVersion: string | null;
+  hasUpdate: boolean;
+}
+
 class ApiClient {
   private async fetch(path: string, options?: RequestInit): Promise<Response> {
     const url = `${API_URL}${path}`;
@@ -234,6 +241,12 @@ class ApiClient {
     const response = await this.fetch('/api/models');
     const data = await response.json();
     return data.models;
+  }
+
+  async getPackageUpdates(): Promise<{ packages: PackageUpdate[]; checkedAt: string }> {
+    const response = await this.fetch('/api/updates');
+    const data = await response.json();
+    return data;
   }
 
   // WebSocket

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { cn } from '@/lib/utils';
-import { useTheme } from '@/components/theme/ThemeProvider';
+import { useTheme } from '@/components/theme/useTheme';
 import {
   PanelRight,
   FileCode,
@@ -941,4 +941,4 @@ index 1234567..abcdefg 100644
   );
 }
 
-export * from './types';
+export type { GitFileStatus, GitFile, GitDiff, GitDiffPanelProps } from './types';

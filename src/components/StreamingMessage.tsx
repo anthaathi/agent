@@ -22,55 +22,89 @@ export function StreamingMessage({
   const startTimeRef = useRef<number | null>(null)
   const lastNotifyRef = useRef(0)
   const onStreamProgressRef = useRef(onStreamProgress)
+  const textRef = useRef(text)
+  const typingDurationRef = useRef(typingDuration)
+  const prevTextRef = useRef(text)
 
   useEffect(() => {
     onStreamProgressRef.current = onStreamProgress
   }, [onStreamProgress])
 
   useEffect(() => {
-    indexRef.current = 0
-    setDisplayedText('')
-    startTimeRef.current = null
-    lastNotifyRef.current = 0
+    typingDurationRef.current = typingDuration
+  }, [typingDuration])
 
-    const totalChars = text.length
-    const durationMs = typingDuration * 1000
-    
-    const typeNext = (timestamp: number) => {
-      if (startTimeRef.current === null) {
-        startTimeRef.current = timestamp
-      }
-      
-      const elapsed = timestamp - startTimeRef.current
-      const progress = Math.min(elapsed / durationMs, 1)
-      const targetIndex = Math.floor(progress * totalChars)
-      
-      if (targetIndex > indexRef.current) {
-        indexRef.current = targetIndex
-        setDisplayedText(text.slice(0, targetIndex))
+  const tick = (timestamp: number) => {
+    const fullText = textRef.current
+    const totalChars = fullText.length
 
-        if (onStreamProgressRef.current && timestamp - lastNotifyRef.current > 120) {
-          lastNotifyRef.current = timestamp
-          onStreamProgressRef.current()
-        }
-      }
-      
-      if (progress < 1) {
-        rafRef.current = requestAnimationFrame(typeNext)
-      } else {
-        setDisplayedText(text)
-        onStreamProgressRef.current?.()
+    if (totalChars === 0) {
+      rafRef.current = null
+      return
+    }
+
+    if (startTimeRef.current === null) {
+      const durationMs = typingDurationRef.current * 1000
+      const progress = totalChars > 0 ? indexRef.current / totalChars : 0
+      startTimeRef.current = timestamp - progress * durationMs
+    }
+
+    const durationMs = typingDurationRef.current * 1000
+    const elapsed = timestamp - startTimeRef.current
+    const progress = durationMs > 0 ? Math.min(elapsed / durationMs, 1) : 1
+    const targetIndex = Math.floor(progress * totalChars)
+
+    if (targetIndex > indexRef.current) {
+      indexRef.current = targetIndex
+      setDisplayedText(fullText.slice(0, targetIndex))
+
+      if (onStreamProgressRef.current && timestamp - lastNotifyRef.current > 120) {
+        lastNotifyRef.current = timestamp
+        onStreamProgressRef.current()
       }
     }
 
-    rafRef.current = requestAnimationFrame(typeNext)
+    if (indexRef.current < totalChars) {
+      rafRef.current = requestAnimationFrame(tick)
+    } else {
+      setDisplayedText(fullText)
+      onStreamProgressRef.current?.()
+      rafRef.current = null
+      startTimeRef.current = null
+    }
+  }
 
+  useEffect(() => {
+    const prevText = prevTextRef.current
+    const isReset = !text.startsWith(prevText)
+
+    if (isReset) {
+      indexRef.current = 0
+      setDisplayedText('')
+      startTimeRef.current = null
+      lastNotifyRef.current = 0
+    }
+
+    prevTextRef.current = text
+    textRef.current = text
+
+    if (text.length > indexRef.current && rafRef.current === null) {
+      rafRef.current = requestAnimationFrame(tick)
+    }
+
+    if (text.length === 0 && rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current)
+      rafRef.current = null
+    }
+  }, [text])
+
+  useEffect(() => {
     return () => {
       if (rafRef.current !== null) {
         cancelAnimationFrame(rafRef.current)
       }
     }
-  }, [text, typingDuration])
+  }, [])
 
   return (
     <div className={cn('relative max-w-full overflow-hidden', className)}>

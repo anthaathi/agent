@@ -5,6 +5,7 @@ export type { ProseMirrorEditorRef } from './ProseMirrorEditor';
 export type {
   Attachment,
   Model,
+  Provider,
   ChatInputProps,
   SlashCommand,
   MentionItem,

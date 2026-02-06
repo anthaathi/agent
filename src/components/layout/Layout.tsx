@@ -2,69 +2,148 @@ import { useState, useCallback, useEffect } from 'react';
 import { Outlet, useNavigate, useParams } from 'react-router-dom';
 import { Sidebar, type Project, type Session } from '@/components/sidebar';
 import { GitDiffPanel } from '@/components/git-diff';
+import { api, type Project as ApiProject, type Session as ApiSession } from '@/lib/api/client';
 
-const defaultProjects: Project[] = [
-  {
-    id: '1',
-    name: 'My Project',
+function mapApiProjectToProject(apiProject: ApiProject): Project {
+  return {
+    id: apiProject.id,
+    name: apiProject.name,
+    path: apiProject.path,
     mode: 'plain',
-    createdAt: new Date(),
-    sessions: [
-      {
-        id: 's1',
-        name: 'Welcome',
-        createdAt: new Date(),
-        updatedAt: new Date(),
-        messageCount: 5,
-      },
-    ],
-  },
-];
+    createdAt: new Date(apiProject.createdAt),
+    updatedAt: new Date(apiProject.updatedAt),
+    sessions: [],
+  };
+}
+
+function mapApiSessions(apiSessions: ApiSession[]): Session[] {
+  return apiSessions.map(session => ({
+    sessionPath: session.sessionPath,
+    name: session.name,
+    createdAt: new Date(session.createdAt),
+    updatedAt: new Date(session.lastActivity),
+    messageCount: 0,
+  }));
+}
 
 export function Layout() {
   const navigate = useNavigate();
-  const { id: sessionId } = useParams();
-  const [projects, setProjects] = useState<Project[]>(defaultProjects);
-  const [activeSessionId, setActiveSessionId] = useState<string>(sessionId || 's1');
+  const { id: sessionPath } = useParams();
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [activeSessionPath, setActiveSessionPath] = useState<string>(sessionPath || '');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [diffPanelOpen, setDiffPanelOpen] = useState(false);
   const [diffPanelCollapsed, setDiffPanelCollapsed] = useState(false);
+  const [creatingSessionInProject, setCreatingSessionInProject] = useState<string | null>(null);
+  const [isLoadingProjects, setIsLoadingProjects] = useState(true);
 
-  const handleSessionSelect = useCallback((_projectId: string, sessionId: string) => {
-    setActiveSessionId(sessionId);
-    navigate(`/session/${sessionId}`);
+  // Sync activeSessionPath with URL
+  useEffect(() => {
+    setActiveSessionPath(sessionPath || '');
+  }, [sessionPath]);
+
+  // Refresh projects from API
+  const refreshProjects = useCallback(async () => {
+    setIsLoadingProjects(true);
+    try {
+      const apiProjects = await api.getProjects();
+      setProjects(apiProjects.map(mapApiProjectToProject));
+    } catch (error) {
+      console.error('Failed to load projects:', error);
+    } finally {
+      setIsLoadingProjects(false);
+    }
+  }, []);
+
+  // Fetch projects from API on mount only
+  useEffect(() => {
+    refreshProjects();
+  }, [refreshProjects]);
+
+  // Load sessions for active session's project (separate effect)
+  useEffect(() => {
+    if (!sessionPath) return;
+
+    const loadActiveSessionProject = async () => {
+      try {
+        const sessionInfo = await api.getSession(sessionPath);
+        if (sessionInfo?.projectId) {
+          // Check if this project already has sessions loaded
+          const project = projects.find(p => p.id === sessionInfo.projectId);
+          if (project && project.sessions.length > 0) return;
+
+          const result = await api.loadProjectSessions(sessionInfo.projectId, 10, 0);
+          const sessions = mapApiSessions(result.sessions);
+          setProjects(prev => prev.map(p => 
+            p.id === sessionInfo.projectId 
+              ? { ...p, sessions } 
+              : p
+          ));
+        }
+      } catch (err) {
+        console.error('Failed to load active session project:', err);
+      }
+    };
+    
+    // Only run if we have projects loaded
+    if (projects.length > 0) {
+      loadActiveSessionProject();
+    }
+  }, [sessionPath, projects.length]);
+
+  const handleSessionSelect = useCallback((_projectId: string, selectedSessionPath: string) => {
+    setActiveSessionPath(selectedSessionPath);
+    navigate(`/session/${encodeURIComponent(selectedSessionPath)}`);
   }, [navigate]);
 
-  const handleNewSession = useCallback((projectId: string) => {
-    const newSession: Session = {
-      id: `s${Date.now()}`,
-      name: `New Session`,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-      messageCount: 0,
-    };
-    setProjects(prev =>
-      prev.map(p =>
-        p.id === projectId
-          ? { ...p, sessions: [...p.sessions, newSession] }
-          : p
-      )
-    );
-    setActiveSessionId(newSession.id);
-    navigate(`/session/${newSession.id}`);
-  }, [navigate]);
+  const handleNewSession = useCallback(async (projectId: string) => {
+    setCreatingSessionInProject(projectId);
+    try {
+      const project = projects.find(p => p.id === projectId);
+      const newSession = await api.createSession(projectId, 'New Session', project?.path);
+      const now = new Date();
+      setProjects(prev =>
+        prev.map(p =>
+          p.id === projectId
+            ? { ...p, updatedAt: now, sessions: [{
+                sessionPath: newSession.sessionPath,
+                name: newSession.name,
+                createdAt: new Date(newSession.createdAt),
+                updatedAt: new Date(newSession.lastActivity),
+                messageCount: 0,
+              }, ...p.sessions] }
+            : p
+        )
+      );
+      setActiveSessionPath(newSession.sessionPath);
+      navigate(`/session/${encodeURIComponent(newSession.sessionPath)}`);
+    } catch (error) {
+      console.error('Failed to create session:', error);
+      const message = error instanceof Error ? error.message : 'Failed to create session';
+      if (message.includes('not found')) {
+        await refreshProjects();
+      }
+    } finally {
+      setCreatingSessionInProject(null);
+    }
+  }, [navigate, projects, refreshProjects]);
 
-  const handleNewProject = useCallback((name: string, path: string, mode: 'plain' | 'git-worktree') => {
-    const newProject: Project = {
-      id: `p${Date.now()}`,
-      name,
-      path: path || undefined,
-      mode,
-      createdAt: new Date(),
-      sessions: [],
-    };
-    setProjects(prev => [...prev, newProject]);
+  const handleNewProject = useCallback(async (name: string, path: string, _mode: 'plain' | 'git-worktree') => {
+    try {
+      const newProject = await api.createProject(name, path);
+      setProjects(prev => [...prev, {
+        id: newProject.id,
+        name: newProject.name,
+        path: newProject.path,
+        mode: 'plain',
+        createdAt: new Date(newProject.createdAt),
+        updatedAt: new Date(newProject.updatedAt || newProject.createdAt),
+        sessions: [],
+      }]);
+    } catch (error) {
+      console.error('Failed to create project:', error);
+    }
   }, []);
 
   const handleRenameProject = useCallback((projectId: string, newName: string) => {
@@ -73,38 +152,81 @@ export function Layout() {
     );
   }, []);
 
-  const handleRenameSession = useCallback((sessionId: string, newName: string) => {
+  const handleRenameSession = useCallback((renamedSessionPath: string, newName: string) => {
     setProjects(prev =>
       prev.map(p => ({
         ...p,
         sessions: p.sessions.map(s =>
-          s.id === sessionId ? { ...s, name: newName } : s
+          s.sessionPath === renamedSessionPath ? { ...s, name: newName } : s
         ),
       }))
     );
   }, []);
 
-  const handleDeleteProject = useCallback((projectId: string) => {
-    setProjects(prev => prev.filter(p => p.id !== projectId));
-    const deletedProject = projects.find(p => p.id === projectId);
-    if (deletedProject?.sessions.some(s => s.id === activeSessionId)) {
-      setActiveSessionId('');
-      navigate('/');
+  const handleDeleteProject = useCallback(async (projectId: string) => {
+    try {
+      await api.deleteProject(projectId);
+      setProjects(prev => prev.filter(p => p.id !== projectId));
+      const deletedProject = projects.find(p => p.id === projectId);
+      if (deletedProject?.sessions.some(s => s.sessionPath === activeSessionPath)) {
+        setActiveSessionPath('');
+        navigate('/');
+      }
+    } catch (error) {
+      console.error('Failed to delete project:', error);
     }
-  }, [projects, activeSessionId, navigate]);
+  }, [projects, activeSessionPath, navigate]);
 
-  const handleDeleteSession = useCallback((sessionId: string) => {
-    setProjects(prev =>
-      prev.map(p => ({
-        ...p,
-        sessions: p.sessions.filter(s => s.id !== sessionId),
-      }))
-    );
-    if (sessionId === activeSessionId) {
-      setActiveSessionId('');
-      navigate('/');
+  const handleDeleteSession = useCallback(async (deletedSessionPath: string) => {
+    try {
+      await api.deleteSession(deletedSessionPath);
+      setProjects(prev =>
+        prev.map(p => ({
+          ...p,
+          sessions: p.sessions.filter(s => s.sessionPath !== deletedSessionPath),
+        }))
+      );
+      if (deletedSessionPath === activeSessionPath) {
+        setActiveSessionPath('');
+        navigate('/');
+      }
+    } catch (error) {
+      console.error('Failed to delete session:', error);
     }
-  }, [activeSessionId, navigate]);
+  }, [activeSessionPath, navigate]);
+
+  const handleLoadProjectSessions = useCallback(async (
+    projectId: string, 
+    limit: number, 
+    offset: number
+  ): Promise<{ sessions: Session[]; total: number; hasMore: boolean }> => {
+    try {
+      const result = await api.loadProjectSessions(projectId, limit, offset);
+      const newSessions = mapApiSessions(result.sessions);
+      
+      // Update project with loaded sessions (deduplicate by path)
+      setProjects(prev =>
+        prev.map(p => {
+          if (p.id !== projectId) return p;
+          
+          if (offset === 0) {
+            // First page - replace all sessions
+            return { ...p, sessions: newSessions };
+          }
+          
+          // Subsequent pages - merge and deduplicate
+          const existingPaths = new Set(p.sessions.map(s => s.sessionPath));
+          const uniqueNewSessions = newSessions.filter(s => !existingPaths.has(s.sessionPath));
+          return { ...p, sessions: [...p.sessions, ...uniqueNewSessions] };
+        })
+      );
+      
+      return { sessions: newSessions, total: result.total, hasMore: result.hasMore };
+    } catch (error) {
+      console.error('Failed to load project sessions:', error);
+      return { sessions: [], total: 0, hasMore: false };
+    }
+  }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -154,7 +276,7 @@ export function Layout() {
     >
       <Sidebar
         projects={projects}
-        activeSessionId={activeSessionId}
+        activeSessionPath={activeSessionPath}
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         collapsed={sidebarCollapsed}
@@ -166,11 +288,17 @@ export function Layout() {
         onRenameSession={handleRenameSession}
         onDeleteProject={handleDeleteProject}
         onDeleteSession={handleDeleteSession}
+        onLoadProjectSessions={handleLoadProjectSessions}
+        creatingSessionInProject={creatingSessionInProject}
+        isLoadingProjects={isLoadingProjects}
       />
       <div className="flex-1 flex flex-col min-w-0 relative">
         <Outlet context={{
           onOpenSidebar: () => setSidebarOpen(true),
           onOpenDiffPanel: () => setDiffPanelOpen(!diffPanelOpen),
+          projects,
+          onNewProject: handleNewProject,
+          refreshProjects,
         }} />
       </div>
 

@@ -65,6 +65,7 @@ export type StreamingContentItem =
 export interface PiSessionState {
   isConnected: boolean;
   isLoading: boolean;
+  error: string | null;
   models: Model<Api>[];
   currentModel?: Model<Api>;
   thinkingLevel: ThinkingLevel;
@@ -106,6 +107,7 @@ export class PiSessionClient {
   private state: PiSessionState = {
     isConnected: false,
     isLoading: false,
+    error: null,
     models: [],
     currentModel: undefined,
     thinkingLevel: 'medium',
@@ -184,8 +186,10 @@ export class PiSessionClient {
     };
 
     this.ws.onclose = (event) => {
-      this.updateState({ isConnected: false });
-      // Only reconnect if it wasn't a deliberate close (e.g., session not found)
+      this.updateState({
+        isConnected: false,
+        error: event.code === 1008 ? (event.reason || 'Session not found') : this.state.error,
+      });
       if (event.code !== 1008) {
         this.attemptReconnect();
       }
@@ -193,6 +197,7 @@ export class PiSessionClient {
 
     this.ws.onerror = (error) => {
       console.error('[PiSessionClient] Error:', error);
+      this.updateState({ error: 'WebSocket connection error' });
     };
 
     this.ws.onmessage = (event) => {
@@ -201,6 +206,7 @@ export class PiSessionClient {
         this.handleServerMessage(message);
       } catch (err) {
         console.error('[PiSessionClient] Failed to parse message:', err);
+        this.updateState({ error: 'Invalid server response' });
       }
     };
   }
@@ -229,8 +235,7 @@ export class PiSessionClient {
   private handleServerMessage(message: ServerMessage): void {
     switch (message.type) {
       case 'connected':
-        this.updateState({ isConnected: true });
-        // Now safe to send commands
+        this.updateState({ isConnected: true, error: null });
         this.sendCommand({ type: 'get_available_models' });
         this.sendCommand({ type: 'get_state' });
         break;
@@ -254,11 +259,11 @@ export class PiSessionClient {
 
       case 'error':
         console.error('[PiSessionClient] Server error:', message.message);
-        this.updateState({ isLoading: false });
+        this.updateState({ isLoading: false, error: message.message || 'Server error' });
         break;
 
       case 'disconnected':
-        this.updateState({ isConnected: false });
+        this.updateState({ isConnected: false, error: message.message || 'Disconnected from session' });
         break;
     }
   }
@@ -268,6 +273,7 @@ export class PiSessionClient {
       case 'agent_start':
         this.updateState({
           isLoading: true,
+          error: null,
           streamingMessageId: `turn-${Date.now()}`,
           streamingText: '',
           streamingThinkingBlocks: [],
@@ -290,7 +296,16 @@ export class PiSessionClient {
           delta?: string;
           content?: string;
           contentIndex?: number;
+          reason?: string;
         };
+
+        if (assistantEvent.type === 'error') {
+          this.updateState({
+            isLoading: false,
+            error: assistantEvent.reason || 'Assistant generation failed',
+          });
+          break;
+        }
 
         if (assistantEvent.partial?.content && Array.isArray(assistantEvent.partial.content)) {
           const content = assistantEvent.partial.content;
@@ -442,10 +457,12 @@ export class PiSessionClient {
         break;
       }
 
-      case 'error':
-        console.error('[PiSessionClient] Agent error:', (event as { type: 'error'; message: string }).message);
-        this.updateState({ isLoading: false });
+      case 'error': {
+        const errorMessage = (event as { type: 'error'; message: string }).message;
+        console.error('[PiSessionClient] Agent error:', errorMessage);
+        this.updateState({ isLoading: false, error: errorMessage || 'Agent error' });
         break;
+      }
     }
   }
 
@@ -465,7 +482,9 @@ export class PiSessionClient {
   private send(message: ClientMessage): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(message));
+      return;
     }
+    this.updateState({ error: 'Session is not connected' });
   }
 
   sendCommand(command: PiCommand): void {

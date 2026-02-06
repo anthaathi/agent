@@ -1,8 +1,9 @@
 import { useNavigate } from 'react-router-dom';
-import { ChevronLeft, Moon, Sun, Monitor, Bell } from 'lucide-react';
+import { ChevronLeft, Moon, Sun, Monitor, Bell, Package } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { cn } from '@/lib/utils';
-import { useTheme } from '@/components/theme/ThemeProvider';
+import { api, type PackageUpdate } from '@/lib/api/client';
+import { useTheme } from '@/components/theme/useTheme';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
@@ -20,12 +21,44 @@ export function Settings() {
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>('default');
   const [soundEnabled, setSoundEnabled] = useState(true);
+  const [packageUpdates, setPackageUpdates] = useState<PackageUpdate[]>([]);
+  const [checkingUpdates, setCheckingUpdates] = useState(true);
+  const [updateError, setUpdateError] = useState<string | null>(null);
 
   useEffect(() => {
     if ('Notification' in window) {
       setNotificationPermission(Notification.permission);
       setNotificationsEnabled(Notification.permission === 'granted');
     }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadPackageUpdates = async () => {
+      setCheckingUpdates(true);
+      setUpdateError(null);
+      try {
+        const data = await api.getPackageUpdates();
+        if (!cancelled) {
+          setPackageUpdates(data.packages || []);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setUpdateError(error instanceof Error ? error.message : 'Failed to check updates');
+        }
+      } finally {
+        if (!cancelled) {
+          setCheckingUpdates(false);
+        }
+      }
+    };
+
+    loadPackageUpdates();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const handleNotificationToggle = async (checked: boolean) => {
@@ -56,6 +89,8 @@ export function Settings() {
     { id: 'dark' as const, name: 'Dark', icon: Moon, description: 'Easy on the eyes' },
     { id: 'system' as const, name: 'System', icon: Monitor, description: 'Follows your OS' },
   ];
+
+  const hasPackageUpdates = packageUpdates.some((pkg) => pkg.hasUpdate);
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -147,6 +182,52 @@ export function Settings() {
                 onCheckedChange={setSoundEnabled}
               />
             </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Package className="w-4 h-4" />
+              Package Updates
+            </CardTitle>
+            <CardDescription>
+              {checkingUpdates
+                ? 'Checking for updates...'
+                : hasPackageUpdates
+                  ? 'New package updates are available'
+                  : 'All tracked packages are up to date'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {updateError ? (
+              <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                {updateError}
+              </div>
+            ) : checkingUpdates ? (
+              <div className="text-xs text-muted-foreground">Loading package versions...</div>
+            ) : (
+              packageUpdates.map((pkg) => (
+                <div key={pkg.name} className="flex items-center justify-between gap-3 text-sm">
+                  <div className="min-w-0">
+                    <p className="font-medium truncate">{pkg.name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {pkg.currentVersion || 'unknown'} → {pkg.latestVersion || 'unknown'}
+                    </p>
+                  </div>
+                  <span
+                    className={cn(
+                      'text-xs px-2 py-0.5 rounded-full border',
+                      pkg.hasUpdate
+                        ? 'border-amber-500/40 bg-amber-500/10 text-amber-600'
+                        : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600'
+                    )}
+                  >
+                    {pkg.hasUpdate ? 'Update available' : 'Up to date'}
+                  </span>
+                </div>
+              ))
+            )}
           </CardContent>
         </Card>
 

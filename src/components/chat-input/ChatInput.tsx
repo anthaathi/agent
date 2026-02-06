@@ -373,6 +373,13 @@ export const ChatInput = forwardRef<ProseMirrorEditorRef, ChatInputProps>(functi
   className,
 }: ChatInputProps, ref) {
   const [selectedModel, setSelectedModel] = useState(propSelectedModel || providers[0]?.models[0]?.id);
+
+  // Update selected model when prop changes (e.g., after loading from session)
+  useEffect(() => {
+    if (propSelectedModel) {
+      setSelectedModel(propSelectedModel);
+    }
+  }, [propSelectedModel]);
   const [content, setContent] = useState({ text: '', markdown: '' });
   const [triggerInfo, setTriggerInfo] = useState<TriggerInfo | null>(null);
   const [isDraggingOver, setIsDraggingOver] = useState(false);

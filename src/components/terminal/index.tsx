@@ -1,230 +1,420 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { init, Terminal, FitAddon } from 'ghostty-web';
+import { init, Terminal, FitAddon, type IDisposable } from 'ghostty-web';
 import { X, Maximize2, Minimize2, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-// Unique ID generator
-let tabCounter = 0;
-const generateTabId = () => `term-${++tabCounter}-${Date.now()}`;
+type TabStatus = 'connecting' | 'connected' | 'error';
 
 interface TerminalTab {
   id: string;
-  name: string;
-  terminal?: Terminal;
-  fitAddon?: FitAddon;
-  disposed?: boolean;
+  status: TabStatus;
+  error?: string;
+}
+
+interface TerminalRuntime {
+  terminal: Terminal;
+  fitAddon: FitAddon;
+  socket: WebSocket | null;
+  dataDisposable?: IDisposable;
+  resizeDisposable?: IDisposable;
+  disposed: boolean;
+}
+
+interface TerminalServerMessage {
+  type: 'ready' | 'output' | 'exit' | 'error' | 'pong';
+  data?: string;
+  message?: string;
+  cwd?: string;
+  exitCode?: number | null;
+}
+
+interface PersistedTerminalState {
+  terminalIds: string[];
+  activeTabId: string | null;
+  height: number;
+  isExpanded: boolean;
 }
 
 interface TerminalPanelProps {
   isOpen: boolean;
   onClose: () => void;
+  sessionPath?: string;
   minHeight?: number;
   maxHeight?: number;
+}
+
+function generateTabId(): string {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return `terminal-${crypto.randomUUID()}`;
+  }
+  return `terminal-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function getStorageKey(sessionPath?: string): string | null {
+  if (!sessionPath) {
+    return null;
+  }
+  return `pi-terminal-tabs:${sessionPath}`;
+}
+
+function loadPersistedTerminalState(sessionPath?: string): PersistedTerminalState {
+  const storageKey = getStorageKey(sessionPath);
+  if (!storageKey || typeof window === 'undefined') {
+    return { terminalIds: [], activeTabId: null, height: 280, isExpanded: false };
+  }
+
+  try {
+    const raw = window.sessionStorage.getItem(storageKey);
+    if (!raw) {
+      return { terminalIds: [], activeTabId: null, height: 280, isExpanded: false };
+    }
+
+    const parsed = JSON.parse(raw) as Partial<PersistedTerminalState>;
+    const terminalIds = Array.isArray(parsed.terminalIds)
+      ? parsed.terminalIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+      : [];
+
+    const activeTabId = typeof parsed.activeTabId === 'string' ? parsed.activeTabId : null;
+    const height = typeof parsed.height === 'number' && Number.isFinite(parsed.height) ? parsed.height : 280;
+    const isExpanded = Boolean(parsed.isExpanded);
+
+    return {
+      terminalIds,
+      activeTabId: activeTabId && terminalIds.includes(activeTabId) ? activeTabId : terminalIds[0] ?? null,
+      height,
+      isExpanded,
+    };
+  } catch {
+    return { terminalIds: [], activeTabId: null, height: 280, isExpanded: false };
+  }
+}
+
+function buildTerminalWsUrl(sessionPath: string, terminalId: string): string {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const encodedPath = encodeURIComponent(sessionPath);
+  const encodedTerminalId = encodeURIComponent(terminalId);
+  return `${protocol}//${window.location.host}/ws/terminal/${encodedPath}?terminalId=${encodedTerminalId}`;
 }
 
 export function TerminalPanel({
   isOpen,
   onClose,
+  sessionPath,
   minHeight = 150,
   maxHeight = 600,
 }: TerminalPanelProps) {
+  const persistedStateRef = useRef<PersistedTerminalState>(loadPersistedTerminalState(sessionPath));
   const containerRefs = useRef<Map<string, HTMLDivElement>>(new Map());
-  const [tabs, setTabs] = useState<TerminalTab[]>([]);
-  const [activeTabId, setActiveTabId] = useState<string | null>(null);
-  const [height, setHeight] = useState(280);
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [isResizing, setIsResizing] = useState(false);
-  const resizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
-  const disposedTerminalsRef = useRef<Set<string>>(new Set());
+  const runtimesRef = useRef<Map<string, TerminalRuntime>>(new Map());
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
-  const lineBuffersRef = useRef<Map<string, string>>(new Map());
+  const initPromiseRef = useRef<Promise<void> | null>(null);
+  const resizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
+
+  const [tabs, setTabs] = useState<TerminalTab[]>(() =>
+    persistedStateRef.current.terminalIds.map((id) => ({ id, status: 'connecting' }))
+  );
+  const [activeTabId, setActiveTabId] = useState<string | null>(() => {
+    const initialActive = persistedStateRef.current.activeTabId;
+    if (initialActive && persistedStateRef.current.terminalIds.includes(initialActive)) {
+      return initialActive;
+    }
+    return persistedStateRef.current.terminalIds[0] ?? null;
+  });
+  const [height, setHeight] = useState(() =>
+    Math.max(minHeight, Math.min(maxHeight, persistedStateRef.current.height))
+  );
+  const [isExpanded, setIsExpanded] = useState(() => persistedStateRef.current.isExpanded);
+  const [isResizing, setIsResizing] = useState(false);
+
+  const ensureTerminalInit = useCallback(() => {
+    if (!initPromiseRef.current) {
+      initPromiseRef.current = init();
+    }
+    return initPromiseRef.current;
+  }, []);
+
+  const updateTab = useCallback((tabId: string, updates: Partial<TerminalTab>) => {
+    setTabs((prev) => prev.map((tab) => (tab.id === tabId ? { ...tab, ...updates } : tab)));
+  }, []);
+
+  const cleanupRuntime = useCallback((tabId: string, closeRemote: boolean) => {
+    const runtime = runtimesRef.current.get(tabId);
+    if (!runtime || runtime.disposed) {
+      return;
+    }
+
+    runtime.disposed = true;
+
+    runtime.dataDisposable?.dispose();
+    runtime.resizeDisposable?.dispose();
+
+    if (runtime.socket && runtime.socket.readyState === WebSocket.OPEN) {
+      if (closeRemote) {
+        runtime.socket.send(JSON.stringify({ type: 'close' }));
+      }
+      runtime.socket.close(1000, closeRemote ? 'Terminal tab closed' : 'Terminal detached');
+    }
+
+    runtime.socket = null;
+
+    try {
+      runtime.terminal.dispose();
+    } catch {
+      // no-op
+    }
+
+    runtimesRef.current.delete(tabId);
+  }, []);
+
+  const addTab = useCallback(() => {
+    const id = generateTabId();
+    setTabs((prev) => [...prev, { id, status: 'connecting' }]);
+    setActiveTabId(id);
+  }, []);
+
+  const removeTab = useCallback((id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    cleanupRuntime(id, true);
+
+    setTabs((prev) => {
+      const nextTabs = prev.filter((tab) => tab.id !== id);
+      if (activeTabId === id) {
+        if (nextTabs.length === 0) {
+          setActiveTabId(null);
+          onClose();
+        } else {
+          setActiveTabId(nextTabs[nextTabs.length - 1].id);
+        }
+      }
+      return nextTabs;
+    });
+  }, [activeTabId, cleanupRuntime, onClose]);
+
+  useEffect(() => {
+    if (!sessionPath || typeof window === 'undefined') {
+      return;
+    }
+
+    const storageKey = getStorageKey(sessionPath);
+    if (!storageKey) {
+      return;
+    }
+
+    const payload: PersistedTerminalState = {
+      terminalIds: tabs.map((tab) => tab.id),
+      activeTabId: activeTabId && tabs.some((tab) => tab.id === activeTabId) ? activeTabId : tabs[0]?.id ?? null,
+      height,
+      isExpanded,
+    };
+
+    window.sessionStorage.setItem(storageKey, JSON.stringify(payload));
+  }, [sessionPath, tabs, activeTabId, height, isExpanded]);
 
   useEffect(() => {
     if (isOpen && tabs.length === 0) {
       addTab();
     }
-  }, [isOpen]);
+  }, [isOpen, tabs.length, addTab]);
+
+  useEffect(() => {
+    if (!activeTabId) {
+      return;
+    }
+
+    if (runtimesRef.current.has(activeTabId)) {
+      const runtime = runtimesRef.current.get(activeTabId);
+      if (runtime && !runtime.disposed) {
+        runtime.terminal.focus();
+      }
+      return;
+    }
+
+    const tab = tabs.find((t) => t.id === activeTabId);
+    const container = containerRefs.current.get(activeTabId);
+
+    if (!tab || !container) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const setupTerminal = async () => {
+      try {
+        await ensureTerminalInit();
+
+        if (cancelled || runtimesRef.current.has(activeTabId)) {
+          return;
+        }
+
+        const latestContainer = containerRefs.current.get(activeTabId);
+        if (!latestContainer) {
+          return;
+        }
+
+        const terminal = new Terminal({
+          fontSize: 14,
+          fontFamily: 'JetBrains Mono, Fira Code, Cascadia Code, Consolas, Monaco, Menlo, monospace',
+          cursorBlink: true,
+          cursorStyle: 'bar',
+          convertEol: true,
+          theme: {
+            background: '#0d1117',
+            foreground: '#e6edf3',
+            cursor: '#e6edf3',
+            black: '#010409',
+            red: '#ff7b72',
+            green: '#3fb950',
+            yellow: '#d29922',
+            blue: '#58a6ff',
+            magenta: '#f778ba',
+            cyan: '#a5d6ff',
+            white: '#b0b8bf',
+            brightBlack: '#6e7681',
+            brightRed: '#ffa198',
+            brightGreen: '#56d364',
+            brightYellow: '#e3b341',
+            brightBlue: '#79c0ff',
+            brightMagenta: '#f088b3',
+            brightCyan: '#b3e0ff',
+            brightWhite: '#ffffff',
+          },
+          scrollback: 5000,
+        });
+
+        const fitAddon = new FitAddon();
+        terminal.loadAddon(fitAddon);
+        terminal.open(latestContainer);
+
+        const runtime: TerminalRuntime = {
+          terminal,
+          fitAddon,
+          socket: null,
+          disposed: false,
+        };
+
+        runtimesRef.current.set(activeTabId, runtime);
+
+        requestAnimationFrame(() => {
+          if (runtime.disposed) {
+            return;
+          }
+          fitAddon.fit();
+          terminal.focus();
+        });
+
+        if (!sessionPath) {
+          terminal.writeln('\x1b[31mNo active session selected.\x1b[0m');
+          updateTab(activeTabId, { status: 'error', error: 'No active session' });
+          return;
+        }
+
+        const socket = new WebSocket(buildTerminalWsUrl(sessionPath, activeTabId));
+        runtime.socket = socket;
+
+        const sendJson = (payload: Record<string, unknown>) => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify(payload));
+          }
+        };
+
+        runtime.dataDisposable = terminal.onData((data) => {
+          sendJson({ type: 'input', data });
+        });
+
+        runtime.resizeDisposable = terminal.onResize(({ cols, rows }) => {
+          sendJson({ type: 'resize', cols, rows });
+        });
+
+        socket.onopen = () => {
+          if (runtime.disposed) {
+            return;
+          }
+          updateTab(activeTabId, { status: 'connected', error: undefined });
+          sendJson({ type: 'resize', cols: terminal.cols, rows: terminal.rows });
+        };
+
+        socket.onmessage = (event) => {
+          if (runtime.disposed) {
+            return;
+          }
+
+          let message: TerminalServerMessage;
+
+          try {
+            message = JSON.parse(event.data) as TerminalServerMessage;
+          } catch {
+            updateTab(activeTabId, { status: 'error', error: 'Invalid terminal server message' });
+            return;
+          }
+
+          if (message.type === 'ready') {
+            if (message.cwd) {
+              terminal.writeln(`\x1b[90m${message.cwd}\x1b[0m`);
+            }
+            return;
+          }
+
+          if (message.type === 'output') {
+            if (typeof message.data === 'string') {
+              terminal.write(message.data);
+            }
+            return;
+          }
+
+          if (message.type === 'error') {
+            const errorText = message.message || 'Terminal error';
+            updateTab(activeTabId, { status: 'error', error: errorText });
+            terminal.writeln(`\r\n\x1b[31m${errorText}\x1b[0m`);
+            return;
+          }
+
+          if (message.type === 'exit') {
+            const exitCode = message.exitCode ?? 0;
+            updateTab(activeTabId, { status: 'error', error: `Exited (${exitCode})` });
+            terminal.writeln(`\r\n\x1b[33mProcess exited with code ${exitCode}\x1b[0m`);
+          }
+        };
+
+        socket.onerror = () => {
+          if (!runtime.disposed) {
+            updateTab(activeTabId, { status: 'error', error: 'Terminal connection error' });
+          }
+        };
+
+        socket.onclose = (event) => {
+          if (runtime.disposed) {
+            return;
+          }
+
+          if (event.code !== 1000) {
+            const errorText = event.reason || 'Terminal disconnected';
+            updateTab(activeTabId, { status: 'error', error: errorText });
+          }
+        };
+      } catch (error) {
+        console.error('Failed to initialize terminal', error);
+        updateTab(activeTabId, {
+          status: 'error',
+          error: error instanceof Error ? error.message : 'Failed to initialize terminal',
+        });
+      }
+    };
+
+    void setupTerminal();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTabId, tabs, sessionPath, ensureTerminalInit, updateTab]);
 
   useEffect(() => {
     return () => {
       resizeObserverRef.current?.disconnect();
-      tabs.forEach(tab => {
-        if (tab.terminal && !tab.disposed) {
-          tab.terminal.dispose();
-        }
-      });
+      for (const tabId of Array.from(runtimesRef.current.keys())) {
+        cleanupRuntime(tabId, false);
+      }
     };
-  }, []);
-
-  const addTab = useCallback(async () => {
-    try {
-      await init();
-      const id = generateTabId();
-      const newTab: TerminalTab = {
-        id,
-        name: `Terminal ${tabs.length + 1}`,
-      };
-      setTabs(prev => [...prev, newTab]);
-      setActiveTabId(id);
-    } catch (error) {
-      console.error('Failed to create terminal:', error);
-    }
-  }, [tabs.length]);
-
-  const removeTab = useCallback((id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    const tab = tabs.find(t => t.id === id);
-    if (tab?.terminal && !tab.disposed) {
-      try {
-        tab.terminal.dispose();
-      } catch {
-        // Already disposed
-      }
-      disposedTerminalsRef.current.add(id);
-    }
-    setTabs(prev => {
-      const newTabs = prev.filter(t => t.id !== id);
-      if (activeTabId === id && newTabs.length > 0) {
-        setActiveTabId(newTabs[newTabs.length - 1].id);
-      } else if (newTabs.length === 0) {
-        setActiveTabId(null);
-        onClose();
-      }
-      return newTabs;
-    });
-  }, [tabs, activeTabId, onClose]);
-
-  useEffect(() => {
-    if (!activeTabId) return;
-
-    const tab = tabs.find(t => t.id === activeTabId);
-    if (!tab || tab.terminal || tab.disposed) return;
-    if (disposedTerminalsRef.current.has(activeTabId)) return;
-
-    const container = containerRefs.current.get(activeTabId);
-    if (!container) return;
-
-    const tabId = activeTabId;
-
-    try {
-      const term = new Terminal({
-        fontSize: 14,
-        fontFamily: 'JetBrains Mono, Fira Code, Cascadia Code, Consolas, Monaco, Menlo, monospace',
-        cursorBlink: true,
-        cursorStyle: 'bar',
-        convertEol: true,
-        theme: {
-          background: '#0d1117',
-          foreground: '#e6edf3',
-          cursor: '#e6edf3',
-          black: '#010409',
-          red: '#ff7b72',
-          green: '#3fb950',
-          yellow: '#d29922',
-          blue: '#58a6ff',
-          magenta: '#f778ba',
-          cyan: '#a5d6ff',
-          white: '#b0b8bf',
-          brightBlack: '#6e7681',
-          brightRed: '#ffa198',
-          brightGreen: '#56d364',
-          brightYellow: '#e3b341',
-          brightBlue: '#79c0ff',
-          brightMagenta: '#f088b3',
-          brightCyan: '#b3e0ff',
-          brightWhite: '#ffffff',
-        },
-        scrollback: 5000,
-      });
-      const fitAddon = new FitAddon();
-
-      term.loadAddon(fitAddon);
-      term.open(container);
-      
-      // Delay fit to ensure container is properly sized
-      setTimeout(() => {
-        try {
-          fitAddon.fit();
-          term.focus();
-        } catch {
-          // Ignore fit errors
-        }
-      }, 50);
-
-      term.writeln('\x1b[1;32m→ Terminal ready\x1b[0m');
-      term.write('$ ');
-      lineBuffersRef.current.set(tabId, '');
-
-      const handleInput = (input: string) => {
-        let buffer = lineBuffersRef.current.get(tabId) || '';
-
-        for (const ch of input) {
-          if (ch === '\r' || ch === '\n') {
-            term.write('\r\n');
-            const command = buffer.trim();
-            buffer = '';
-            
-            if (command) {
-              // Echo command execution
-              if (command === 'clear' || command === 'cls') {
-                term.clear();
-              } else if (command === 'help') {
-                term.writeln('\x1b[36mAvailable commands:\x1b[0m');
-                term.writeln('  clear, cls  Clear the terminal');
-                term.writeln('  help        Show this help message');
-              } else {
-                term.writeln(`\x1b[90mCommand not found: ${command}\x1b[0m`);
-              }
-            }
-            
-            term.write('$ ');
-            continue;
-          }
-
-          if (ch === '\u007f' || ch === '\b' || ch === '\u0008') {
-            if (buffer.length > 0) {
-              buffer = buffer.slice(0, -1);
-              term.write('\b \b');
-            }
-            continue;
-          }
-
-          if (ch === '\u0003') {
-            term.write('^C\r\n');
-            buffer = '';
-            term.write('$ ');
-            continue;
-          }
-
-          if (ch === '\u000c') {
-            term.clear();
-            term.write('$ ');
-            buffer = '';
-            continue;
-          }
-
-          if (ch === '\u001b') {
-            continue;
-          }
-
-          if (ch >= ' ' || ch === '\t') {
-            buffer += ch;
-            term.write(ch);
-          }
-        }
-
-        lineBuffersRef.current.set(tabId, buffer);
-      };
-
-      term.onData(handleInput);
-
-      setTabs(prev => prev.map(t =>
-        t.id === tabId ? { ...t, terminal: term, fitAddon } : t
-      ));
-    } catch (error) {
-      console.error('Failed to create terminal:', error);
-    }
-  }, [activeTabId, tabs]);
+  }, [cleanupRuntime]);
 
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -236,13 +426,17 @@ export function TerminalPanel({
   }, [height]);
 
   useEffect(() => {
-    if (!isResizing) return;
+    if (!isResizing) {
+      return;
+    }
 
     const handleMouseMove = (e: MouseEvent) => {
-      if (!resizeRef.current) return;
+      if (!resizeRef.current) {
+        return;
+      }
       const deltaY = resizeRef.current.startY - e.clientY;
-      const newHeight = Math.max(minHeight, Math.min(maxHeight, resizeRef.current.startHeight + deltaY));
-      setHeight(newHeight);
+      const nextHeight = Math.max(minHeight, Math.min(maxHeight, resizeRef.current.startHeight + deltaY));
+      setHeight(nextHeight);
     };
 
     const handleMouseUp = () => {
@@ -259,38 +453,65 @@ export function TerminalPanel({
     };
   }, [isResizing, minHeight, maxHeight]);
 
-  // Fit terminal when height changes
   useEffect(() => {
-    if (!activeTabId) return;
+    if (!activeTabId) {
+      return;
+    }
 
-    const activeTab = tabs.find(t => t.id === activeTabId);
-    if (!activeTab?.fitAddon || activeTab.disposed) return;
-    if (disposedTerminalsRef.current.has(activeTabId)) return;
+    const runtime = runtimesRef.current.get(activeTabId);
+    if (!runtime || runtime.disposed) {
+      return;
+    }
 
     const rafId = requestAnimationFrame(() => {
+      if (runtime.disposed) {
+        return;
+      }
+
       try {
-        activeTab.fitAddon?.fit();
+        runtime.fitAddon.fit();
+        if (runtime.socket?.readyState === WebSocket.OPEN) {
+          runtime.socket.send(JSON.stringify({
+            type: 'resize',
+            cols: runtime.terminal.cols,
+            rows: runtime.terminal.rows,
+          }));
+        }
       } catch {
-        disposedTerminalsRef.current.add(activeTabId);
+        updateTab(activeTabId, { status: 'error', error: 'Failed to resize terminal' });
       }
     });
 
     return () => cancelAnimationFrame(rafId);
-  }, [height, isExpanded, tabs, activeTabId]);
+  }, [height, isExpanded, activeTabId, updateTab]);
 
-  // Resize observer for container changes
   useEffect(() => {
     resizeObserverRef.current?.disconnect();
 
-    if (!activeTabId) return;
+    if (!activeTabId) {
+      return;
+    }
 
-    const activeTab = tabs.find(t => t.id === activeTabId);
-    const container = activeTabId ? containerRefs.current.get(activeTabId) : null;
+    const runtime = runtimesRef.current.get(activeTabId);
+    const container = containerRefs.current.get(activeTabId);
 
-    if (!activeTab?.fitAddon || !container) return;
+    if (!runtime || runtime.disposed || !container) {
+      return;
+    }
 
     resizeObserverRef.current = new ResizeObserver(() => {
-      activeTab.fitAddon?.fit();
+      if (runtime.disposed) {
+        return;
+      }
+
+      runtime.fitAddon.fit();
+      if (runtime.socket?.readyState === WebSocket.OPEN) {
+        runtime.socket.send(JSON.stringify({
+          type: 'resize',
+          cols: runtime.terminal.cols,
+          rows: runtime.terminal.rows,
+        }));
+      }
     });
 
     resizeObserverRef.current.observe(container);
@@ -298,16 +519,24 @@ export function TerminalPanel({
     return () => {
       resizeObserverRef.current?.disconnect();
     };
-  }, [activeTabId, tabs]);
+  }, [activeTabId]);
 
   useEffect(() => {
-    const activeTab = tabs.find(t => t.id === activeTabId);
-    if (activeTab?.terminal && !activeTab.disposed) {
-      activeTab.terminal.focus();
+    if (!activeTabId) {
+      return;
     }
-  }, [activeTabId, tabs]);
 
-  if (!isOpen) return null;
+    const runtime = runtimesRef.current.get(activeTabId);
+    if (runtime && !runtime.disposed) {
+      runtime.terminal.focus();
+    }
+  }, [activeTabId]);
+
+  if (!isOpen) {
+    return null;
+  }
+
+  const activeTab = tabs.find((tab) => tab.id === activeTabId);
 
   return (
     <div
@@ -326,21 +555,26 @@ export function TerminalPanel({
         />
       )}
 
-      {/* VS Code-style tab bar */}
       <div className="flex items-center justify-between bg-[#010409] border-b border-[#30363d] shrink-0">
         <div className="flex items-center gap-0 overflow-x-auto no-scrollbar">
-          {tabs.map((tab) => (
+          {tabs.map((tab, index) => (
             <button
               key={tab.id}
               onClick={() => setActiveTabId(tab.id)}
               className={cn(
-                'flex items-center gap-2 px-3 py-2 text-xs border-r border-[#30363d] min-w-[120px] max-w-[200px] group',
+                'flex items-center gap-2 px-3 py-2 text-xs border-r border-[#30363d] min-w-[120px] max-w-[220px] group',
                 activeTabId === tab.id
                   ? 'bg-[#0d1117] text-[#e6edf3]'
                   : 'bg-[#010409] text-[#8b949e] hover:text-[#e6edf3] hover:bg-[#161b22]'
               )}
             >
-              <span className="truncate flex-1 text-left">{tab.name}</span>
+              <span
+                className={cn(
+                  'w-1.5 h-1.5 rounded-full shrink-0',
+                  tab.status === 'connected' ? 'bg-emerald-400' : tab.status === 'connecting' ? 'bg-amber-400' : 'bg-rose-400'
+                )}
+              />
+              <span className="truncate flex-1 text-left">Terminal {index + 1}</span>
               {tabs.length > 1 && (
                 <span
                   onClick={(e) => removeTab(tab.id, e)}
@@ -360,7 +594,10 @@ export function TerminalPanel({
           </button>
         </div>
 
-        <div className="flex items-center gap-0.5 shrink-0 px-2">
+        <div className="flex items-center gap-2 shrink-0 px-2">
+          {activeTab?.error && (
+            <span className="text-[10px] text-rose-300 max-w-[220px] truncate">{activeTab.error}</span>
+          )}
           <button
             onClick={() => setIsExpanded(!isExpanded)}
             className="p-1.5 rounded text-[#8b949e] hover:text-[#e6edf3] hover:bg-[#30363d]/50 transition-colors"
@@ -378,13 +615,15 @@ export function TerminalPanel({
         </div>
       </div>
 
-      {/* Terminal container - fills entire area */}
-      <div 
+      <div
         className="flex-1 relative overflow-hidden cursor-text"
         onClick={() => {
-          const activeTab = tabs.find(t => t.id === activeTabId);
-          if (activeTab?.terminal && !activeTab.disposed) {
-            activeTab.terminal.focus();
+          if (!activeTabId) {
+            return;
+          }
+          const runtime = runtimesRef.current.get(activeTabId);
+          if (runtime && !runtime.disposed) {
+            runtime.terminal.focus();
           }
         }}
       >
@@ -392,17 +631,17 @@ export function TerminalPanel({
           <div
             key={tab.id}
             ref={(el) => {
-              if (el) containerRefs.current.set(tab.id, el);
-              else containerRefs.current.delete(tab.id);
+              if (el) {
+                containerRefs.current.set(tab.id, el);
+              } else {
+                containerRefs.current.delete(tab.id);
+              }
             }}
             className={cn(
               'terminal-host absolute inset-0',
               activeTabId === tab.id ? 'block' : 'hidden'
             )}
-            style={{ 
-              width: '100%', 
-              height: '100%',
-            }}
+            style={{ width: '100%', height: '100%' }}
           />
         ))}
       </div>

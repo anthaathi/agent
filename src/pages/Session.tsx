@@ -2,7 +2,7 @@ import { useRef, useState, useEffect, useCallback, useMemo, type ComponentType }
 import { useParams, useOutletContext } from 'react-router-dom';
 import { Streamdown } from 'streamdown';
 import { code } from '@streamdown/code';
-import { Globe, FileText, FolderTree, FileSearch, Image, Terminal, Menu, GitBranch } from 'lucide-react';
+import { Globe, FileText, FolderTree, FileSearch, Image, Terminal, Menu, GitBranch, RefreshCw } from 'lucide-react';
 import { ChatInput } from '@/components/chat-input';
 import type { Attachment, SlashCommand, MentionItem, ProseMirrorEditorRef, Provider } from '@/components/chat-input';
 
@@ -297,6 +297,7 @@ function MessageBubble({
 const DEFAULT_PI_STATE: PiSessionState = {
   isConnected: false,
   isLoading: false,
+  error: null,
   models: [],
   currentModel: undefined,
   thinkingLevel: 'medium',
@@ -351,6 +352,7 @@ export function Session() {
   const [inputPadding, setInputPadding] = useState(96);
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputWrapRef = useRef<HTMLDivElement>(null);
@@ -359,6 +361,39 @@ export function Session() {
   const prevLoadingRef = useRef(false);
   const streamingCommittedRef = useRef(false);
   const initialLoadRef = useRef(true);
+
+  const terminalPanelStorageKey = sessionId ? `pi-terminal-panel:${sessionId}` : null;
+
+  useEffect(() => {
+    if (!terminalPanelStorageKey || typeof window === 'undefined') {
+      setTerminalOpen(false);
+      return;
+    }
+
+    try {
+      const raw = window.sessionStorage.getItem(terminalPanelStorageKey);
+      if (!raw) {
+        setTerminalOpen(false);
+        return;
+      }
+
+      const parsed = JSON.parse(raw) as { open?: boolean };
+      setTerminalOpen(Boolean(parsed.open));
+    } catch {
+      setTerminalOpen(false);
+    }
+  }, [terminalPanelStorageKey]);
+
+  useEffect(() => {
+    if (!terminalPanelStorageKey || typeof window === 'undefined') {
+      return;
+    }
+
+    window.sessionStorage.setItem(
+      terminalPanelStorageKey,
+      JSON.stringify({ open: terminalOpen })
+    );
+  }, [terminalPanelStorageKey, terminalOpen]);
 
   // Convert models to Provider format for ChatInput
   const providers = useMemo((): Provider[] => {
@@ -448,6 +483,22 @@ export function Session() {
         }
       }
 
+      if (event.type === 'message_update') {
+        const updateEvent = event as {
+          type: 'message_update';
+          assistantMessageEvent?: { type?: string };
+        };
+        if (updateEvent.assistantMessageEvent?.type === 'error') {
+          streamingCommittedRef.current = true;
+          setStreamingMessage(null);
+        }
+      }
+
+      if (event.type === 'error') {
+        streamingCommittedRef.current = true;
+        setStreamingMessage(null);
+      }
+
       if (event.type === 'message_end') {
         const msgEndEvent = event as {
           type: 'message_end';
@@ -521,93 +572,103 @@ export function Session() {
     prevLoadingRef.current = piState.isLoading;
   }, [piState.isLoading, piState.streamingMessageId, piState.streamingText, piState.streamingThinkingBlocks, piState.streamingToolCalls.size, piState.streamingContentOrder]);
 
-  // Load history on session change
-  useEffect(() => {
-    setMessages([]);
-    setStreamingMessage(null);
-    streamingCommittedRef.current = false;
-    initialLoadRef.current = true;
-    
+  const loadHistory = useCallback(async () => {
     if (!sessionId) {
       setIsLoadingHistory(false);
       return;
     }
 
     setIsLoadingHistory(true);
+    setHistoryError(null);
 
-    const loadHistory = async () => {
-      try {
-        const entries = await api.getSessionMessages(sessionId);
-        const loadedMessages: Message[] = [];
-        const toolResultsMap = new Map<string, { content: unknown; isError: boolean }>();
+    try {
+      const entries = await api.getSessionMessages(sessionId);
+      const loadedMessages: Message[] = [];
+      const toolResultsMap = new Map<string, { content: unknown; isError: boolean }>();
 
-        // First pass: collect all tool results
-        for (const entry of entries) {
-          if (entry.type === 'message' && entry.message) {
-            const msg = entry.message as { role: string; toolCallId?: string; content: unknown; isError?: boolean };
-            if (msg.role === 'toolResult' && msg.toolCallId) {
-              toolResultsMap.set(msg.toolCallId, {
-                content: msg.content,
-                isError: msg.isError || false,
-              });
-            }
+      for (const entry of entries) {
+        if (entry.type === 'message' && entry.message) {
+          const msg = entry.message as { role: string; toolCallId?: string; content: unknown; isError?: boolean };
+          if (msg.role === 'toolResult' && msg.toolCallId) {
+            toolResultsMap.set(msg.toolCallId, {
+              content: msg.content,
+              isError: msg.isError || false,
+            });
           }
         }
-
-        // Second pass: build messages with tool results merged
-        for (const entry of entries) {
-          if (entry.type === 'message' && entry.message) {
-            const msg = entry.message;
-            const parsed = parseMessageContent(msg.content);
-
-            if (msg.role === 'user' || msg.role === 'assistant') {
-              // Merge tool results into tool calls
-              const toolCallsWithResults = parsed.toolCalls.map(tc => {
-                const result = toolResultsMap.get(tc.id);
-                if (result) {
-                  const resultContent = Array.isArray(result.content) 
-                    ? result.content 
-                    : [{ type: 'text', text: String(result.content) }];
-                  return {
-                    ...tc,
-                    result: { content: resultContent },
-                    isError: result.isError,
-                    isRunning: false,
-                  };
-                }
-                return tc;
-              });
-
-              loadedMessages.push({
-                id: entry.id,
-                role: msg.role,
-                text: parsed.text,
-                thinkingBlocks: parsed.thinkingBlocks.length > 0 ? parsed.thinkingBlocks : undefined,
-                toolCalls: toolCallsWithResults.length > 0 ? toolCallsWithResults : undefined,
-                contentOrder: parsed.contentOrder.length > 0 ? parsed.contentOrder : undefined,
-                attachments: [],
-                images: parsed.images.length > 0 ? parsed.images : undefined,
-                mentions: [],
-                timestamp: new Date(entry.timestamp),
-              });
-            }
-          }
-        }
-
-        setMessages(loadedMessages);
-        // Scroll to bottom instantly (no animation)
-        if (messagesContainerRef.current) {
-          messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
-        }
-        setIsLoadingHistory(false);
-      } catch (err) {
-        console.error('Failed to load session history:', err);
-        setIsLoadingHistory(false);
       }
-    };
 
-    loadHistory();
+      for (const entry of entries) {
+        if (entry.type === 'message' && entry.message) {
+          const msg = entry.message;
+          const parsed = parseMessageContent(msg.content);
+
+          if (msg.role === 'user' || msg.role === 'assistant') {
+            const toolCallsWithResults = parsed.toolCalls.map(tc => {
+              const result = toolResultsMap.get(tc.id);
+              if (result) {
+                const resultContent = Array.isArray(result.content)
+                  ? result.content
+                  : [{ type: 'text', text: String(result.content) }];
+                return {
+                  ...tc,
+                  result: { content: resultContent },
+                  isError: result.isError,
+                  isRunning: false,
+                };
+              }
+              return tc;
+            });
+
+            loadedMessages.push({
+              id: entry.id,
+              role: msg.role,
+              text: parsed.text,
+              thinkingBlocks: parsed.thinkingBlocks.length > 0 ? parsed.thinkingBlocks : undefined,
+              toolCalls: toolCallsWithResults.length > 0 ? toolCallsWithResults : undefined,
+              contentOrder: parsed.contentOrder.length > 0 ? parsed.contentOrder : undefined,
+              attachments: [],
+              images: parsed.images.length > 0 ? parsed.images : undefined,
+              mentions: [],
+              timestamp: new Date(entry.timestamp),
+            });
+          }
+        }
+      }
+
+      setMessages(loadedMessages);
+      if (messagesContainerRef.current) {
+        messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+      }
+      setIsLoadingHistory(false);
+    } catch (err) {
+      console.error('Failed to load session history:', err);
+      setHistoryError('Failed to load session history');
+      setIsLoadingHistory(false);
+    }
   }, [sessionId]);
+
+  useEffect(() => {
+    setMessages([]);
+    setStreamingMessage(null);
+    setHistoryError(null);
+    streamingCommittedRef.current = false;
+    initialLoadRef.current = true;
+
+    if (!sessionId) {
+      setIsLoadingHistory(false);
+      return;
+    }
+
+    void loadHistory();
+  }, [sessionId, loadHistory]);
+
+  const handleRefreshMessages = useCallback(() => {
+    if (!sessionId || isLoadingHistory || piState.isLoading) {
+      return;
+    }
+    void loadHistory();
+  }, [sessionId, isLoadingHistory, piState.isLoading, loadHistory]);
 
   const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
     const container = messagesContainerRef.current;
@@ -727,6 +788,20 @@ export function Session() {
               <span className="hidden sm:inline">Changes</span>
             </button>
             <button
+              onClick={handleRefreshMessages}
+              disabled={isLoadingHistory || piState.isLoading}
+              className={cn(
+                "flex items-center gap-1 transition-colors",
+                isLoadingHistory || piState.isLoading
+                  ? "text-muted-foreground/50 cursor-not-allowed"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+              title={piState.isLoading ? 'Wait for response to finish' : 'Refresh messages'}
+            >
+              <RefreshCw className={cn("w-3 h-3", isLoadingHistory && "animate-spin")} />
+              <span className="hidden sm:inline">Refresh</span>
+            </button>
+            <button
               onClick={() => setTerminalOpen(!terminalOpen)}
               className={cn(
                 "flex items-center gap-1 transition-colors",
@@ -740,6 +815,21 @@ export function Session() {
           </div>
         </div>
       </header>
+
+      {(piState.error || historyError) && (
+        <div className="max-w-2xl mx-auto px-4 pb-2 space-y-2">
+          {piState.error && (
+            <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              {piState.error}
+            </div>
+          )}
+          {historyError && (
+            <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              {historyError}
+            </div>
+          )}
+        </div>
+      )}
 
       <main
         ref={messagesContainerRef}
@@ -810,8 +900,10 @@ export function Session() {
 
       {terminalOpen && (
         <TerminalPanel
+          key={sessionId}
           isOpen={terminalOpen}
           onClose={() => setTerminalOpen(false)}
+          sessionPath={sessionId}
         />
       )}
     </>

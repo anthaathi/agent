@@ -2,7 +2,7 @@ export type SessionStatus = 'idle' | 'loading' | 'error' | 'stalled';
 export type ProjectMode = 'plain' | 'git-worktree';
 
 export interface Session {
-  id: string;
+  sessionPath: string;  // URL-encoded path, used as identifier
   name: string;
   createdAt: Date;
   updatedAt: Date;
@@ -17,20 +17,24 @@ export interface Project {
   mode: ProjectMode;
   sessions: Session[];
   createdAt: Date;
+  updatedAt: Date;
 }
 
 export interface SidebarProps {
   projects: Project[];
-  activeSessionId?: string;
+  activeSessionPath?: string;
   isOpen?: boolean;
   onClose?: () => void;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
-  onSessionSelect: (projectId: string, sessionId: string) => void;
+  onSessionSelect: (projectId: string, sessionPath: string) => void;
   onNewSession: (projectId: string) => void;
   onNewProject: (name: string, path: string, mode: ProjectMode) => void;
   onRenameProject?: (projectId: string, newName: string) => void;
-  onRenameSession?: (sessionId: string, newName: string) => void;
+  onRenameSession?: (sessionPath: string, newName: string) => void;
   onDeleteProject?: (projectId: string) => void;
-  onDeleteSession?: (sessionId: string) => void;
+  onDeleteSession?: (sessionPath: string) => void;
+  onLoadProjectSessions?: (projectId: string, limit: number, offset: number) => Promise<{ sessions: Session[]; total: number; hasMore: boolean }>;
+  creatingSessionInProject?: string | null;
+  isLoadingProjects?: boolean;
 }
