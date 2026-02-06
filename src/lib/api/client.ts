@@ -1,3 +1,5 @@
+import type { SessionEntry } from './pi-types';
+
 const API_URL = ''; // Use relative URLs with Vite proxy
 
 export interface Project {
@@ -9,10 +11,9 @@ export interface Project {
 }
 
 export interface Session {
-  id: string;
+  sessionPath: string;
   projectId: string;
   name: string;
-  piSessionFile: string | null;
   status: 'idle' | 'streaming' | 'error';
   createdAt: number;
   lastActivity: number;
@@ -119,6 +120,12 @@ class ApiClient {
     return data.sessions;
   }
 
+  async loadProjectSessions(projectId: string, limit: number = 10, offset: number = 0): Promise<{ sessions: Session[]; total: number; hasMore: boolean }> {
+    const response = await this.fetch(`/api/projects/${projectId}/sessions?limit=${limit}&offset=${offset}`);
+    const data = await response.json();
+    return data;
+  }
+
   // Sessions
   async createSession(projectId: string, name?: string, cwd?: string): Promise<Session> {
     const response = await this.fetch('/api/sessions', {
@@ -129,21 +136,31 @@ class ApiClient {
     return data.session;
   }
 
-  async getSession(id: string): Promise<Session> {
-    const response = await this.fetch(`/api/sessions/${id}`);
+  async getSession(sessionPath: string): Promise<Session> {
+    const encodedPath = encodeURIComponent(encodeURIComponent(sessionPath));
+    const response = await this.fetch(`/api/sessions/${encodedPath}`);
     const data = await response.json();
     return data.session;
   }
 
-  async deleteSession(id: string): Promise<void> {
-    await this.fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+  async deleteSession(sessionPath: string): Promise<void> {
+    const encodedPath = encodeURIComponent(encodeURIComponent(sessionPath));
+    await this.fetch(`/api/sessions/${encodedPath}`, { method: 'DELETE' });
   }
 
-  async sendCommand(sessionId: string, command: Record<string, unknown>): Promise<void> {
-    await this.fetch(`/api/sessions/${sessionId}/command`, {
+  async sendCommand(sessionPath: string, command: Record<string, unknown>): Promise<void> {
+    const encodedPath = encodeURIComponent(encodeURIComponent(sessionPath));
+    await this.fetch(`/api/sessions/${encodedPath}/command`, {
       method: 'POST',
       body: JSON.stringify({ command }),
     });
+  }
+
+  async getSessionMessages(sessionPath: string): Promise<SessionEntry[]> {
+    const encodedPath = encodeURIComponent(encodeURIComponent(sessionPath));
+    const response = await this.fetch(`/api/sessions/${encodedPath}/messages`);
+    const data = await response.json();
+    return data.messages;
   }
 
   // File System

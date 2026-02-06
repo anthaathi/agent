@@ -17,7 +17,8 @@ import {
   ArrowLeft,
   Loader2,
 } from 'lucide-react';
-import { api, type FileEntry, type GitInfo } from '@/lib/api/client';
+import { api } from '@/lib/api/client';
+import type { FileEntry, GitInfo } from '@/lib/api/client';
 import { cn } from '@/lib/utils';
 
 interface FileBrowserDialogProps {
@@ -36,12 +37,22 @@ async function detectGit(path: string): Promise<GitInfo> {
   return await api.getGitInfo(path);
 }
 
+async function fetchHomeDirectory(): Promise<string> {
+  const response = await fetch('/api/fs/home');
+  if (!response.ok) {
+    throw new Error('Failed to fetch home directory');
+  }
+  const data = await response.json();
+  return typeof data.path === 'string' ? data.path : '/';
+}
+
 export function FileBrowserDialog({
   open,
   onOpenChange,
   onSelect,
   initialPath = '/',
 }: FileBrowserDialogProps) {
+  const [homePath, setHomePath] = useState(initialPath);
   const [currentPath, setCurrentPath] = useState(initialPath);
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -49,6 +60,27 @@ export function FileBrowserDialog({
   const [step, setStep] = useState<'browse' | 'confirm'>('browse');
   const [gitInfo, setGitInfo] = useState<GitInfo | null>(null);
   const [detectingGit, setDetectingGit] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadHomeDirectory = async () => {
+      try {
+        const path = await fetchHomeDirectory();
+        if (cancelled) return;
+        setHomePath(path);
+        setCurrentPath((prev) => (prev === initialPath || prev === '/' ? path : prev));
+      } catch (error) {
+        console.error('Failed to get home directory:', error);
+      }
+    };
+
+    loadHomeDirectory();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [initialPath]);
 
   const loadDirectory = useCallback(async (path: string) => {
     setLoading(true);
@@ -98,15 +130,14 @@ export function FileBrowserDialog({
     (mode: 'plain' | 'git-worktree') => {
       onSelect(selectedPath || currentPath, mode);
       onOpenChange(false);
-      // Reset state
       setTimeout(() => {
         setStep('browse');
         setSelectedPath(null);
         setGitInfo(null);
-        setCurrentPath(initialPath);
+        setCurrentPath(homePath);
       }, 200);
     },
-    [selectedPath, currentPath, onSelect, onOpenChange, initialPath]
+    [selectedPath, currentPath, onSelect, onOpenChange, homePath]
   );
 
   const handleBack = useCallback(() => {
@@ -120,9 +151,9 @@ export function FileBrowserDialog({
       setStep('browse');
       setSelectedPath(null);
       setGitInfo(null);
-      setCurrentPath(initialPath);
+      setCurrentPath(homePath);
     }, 200);
-  }, [onOpenChange, initialPath]);
+  }, [onOpenChange, homePath]);
 
   const pathParts = currentPath.split('/').filter(Boolean);
 
@@ -137,11 +168,10 @@ export function FileBrowserDialog({
 
         {step === 'browse' ? (
           <>
-            {/* Breadcrumb */}
             <div className="flex items-center gap-1 px-4 py-2 border-b border-neutral-800 text-sm">
               <button
                 onClick={() => {
-                  setCurrentPath('/');
+                  setCurrentPath(homePath);
                   setSelectedPath(null);
                 }}
                 className="p-1 hover:bg-white/10 rounded transition-colors"
@@ -169,7 +199,6 @@ export function FileBrowserDialog({
               </div>
             </div>
 
-            {/* File List */}
             <div className="h-[300px] overflow-y-auto p-2">
               {loading ? (
                 <div className="flex items-center justify-center h-full text-neutral-500 text-sm">
@@ -214,7 +243,6 @@ export function FileBrowserDialog({
               )}
             </div>
 
-            {/* Footer */}
             <div className="flex items-center justify-between px-4 py-3 border-t border-neutral-800">
               <div className="text-xs text-neutral-500 truncate max-w-[200px]">
                 {selectedPath || currentPath}
@@ -244,10 +272,8 @@ export function FileBrowserDialog({
             </div>
           </>
         ) : (
-          /* Git Mode Selection Step */
           <>
             <div className="p-4 space-y-4">
-              {/* Selected Path Display */}
               <div className="flex items-center gap-2 px-3 py-2 bg-neutral-900 rounded-lg border border-neutral-800">
                 <Folder className="w-4 h-4 text-neutral-500" />
                 <span className="text-sm text-neutral-300 truncate flex-1">
@@ -261,7 +287,6 @@ export function FileBrowserDialog({
                 </button>
               </div>
 
-              {/* Git Status */}
               {gitInfo?.isRepo && (
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 text-sm">
@@ -275,7 +300,6 @@ export function FileBrowserDialog({
                 </div>
               )}
 
-              {/* Mode Options */}
               <div className="space-y-2 pt-2">
                 {gitInfo?.isRepo ? (
                   <>
@@ -283,7 +307,6 @@ export function FileBrowserDialog({
                       Choose working mode
                     </p>
                     
-                    {/* Default Option - Continue */}
                     <button
                       onClick={() => handleModeSelect('plain')}
                       className="w-full flex items-center gap-3 p-3 rounded-lg border border-neutral-800 hover:border-neutral-700 hover:bg-neutral-900/50 transition-all text-left"
@@ -299,7 +322,6 @@ export function FileBrowserDialog({
                       </div>
                     </button>
 
-                    {/* Git Worktree Option */}
                     <button
                       onClick={() => handleModeSelect('git-worktree')}
                       className="w-full flex items-center gap-3 p-3 rounded-lg border border-neutral-800 hover:border-neutral-700 hover:bg-neutral-900/50 transition-all text-left"
@@ -326,7 +348,6 @@ export function FileBrowserDialog({
               </div>
             </div>
 
-            {/* Footer */}
             <div className="flex items-center justify-between px-4 py-3 border-t border-neutral-800">
               <Button
                 variant="outline"
