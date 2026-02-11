@@ -1,0 +1,26 @@
+{
+  "name": "pi-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --include src src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc"
+  },
+  "packageManager": "yarn@4.10.3",
+  "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "@fastify/websocket": "^11.2.0",
+    "@mariozechner/pi-ai": "^0.52.6",
+    "@mariozechner/pi-coding-agent": "^0.52.6",
+    "fastify": "^5.7.4",
+    "node-pty": "^1.1.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
