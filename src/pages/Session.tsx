@@ -12,6 +12,9 @@ import { PiSessionClient, type ToolCallState, type PiSessionState, type Streamin
 import { api } from '@/lib/api/client';
 import { cn, fileToBase64 } from '@/lib/utils';
 import { parseMessageContent } from '@/lib/utils/message-parser';
+import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
+import { MessageActions } from '@/components/message-actions/MessageActions';
+import { ScrollToBottom } from '@/components/scroll-to-bottom/ScrollToBottom';
 
 interface MessageImage {
   data: string;
@@ -283,11 +286,15 @@ function MessageBubble({
           )}
         </div>
         
-        {isUser && (
-          <div className="text-[10px] text-muted-foreground mt-1 text-right">
-            {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-          </div>
-        )}
+        <div className="flex items-center gap-2 mt-1">
+          {isUser ? (
+            <div className="text-[10px] text-muted-foreground">
+              {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </div>
+          ) : (
+            <MessageActions content={message.text} />
+          )}
+        </div>
       </div>
     </div>
   );
@@ -353,7 +360,7 @@ export function Session() {
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
-  
+
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputWrapRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<ProseMirrorEditorRef>(null);
@@ -759,6 +766,29 @@ export function Session() {
     client?.abort();
   }, [client]);
 
+  // Keyboard shortcuts
+  useKeyboardShortcuts([
+    {
+      key: 'k',
+      ctrl: true,
+      handler: () => {
+        // Command palette will be implemented separately
+      },
+    },
+    {
+      key: 'j',
+      ctrl: true,
+      handler: () => setTerminalOpen((prev) => !prev),
+    },
+    {
+      key: 'Escape',
+      handler: () => {
+        if (terminalOpen) setTerminalOpen(false);
+      },
+      preventDefault: false,
+    },
+  ]);
+
   return (
     <>
       <header className="shrink-0">
@@ -856,10 +886,9 @@ export function Session() {
           ) : (
             <>
               {messages.map((msg) => (
-                <MessageBubble 
-                  key={msg.id} 
-                  message={msg} 
-                />
+                <div key={msg.id} className="group">
+                  <MessageBubble message={msg} />
+                </div>
               ))}
               {streamingMessage && (streamingMessage.text || streamingMessage.thinkingBlocks?.length || streamingMessage.toolCalls?.length) && (
                 <MessageBubble 
@@ -881,7 +910,10 @@ export function Session() {
         </div>
       </main>
 
-      <div ref={inputWrapRef} className="shrink-0 bg-background/80 backdrop-blur-sm">
+      <div ref={inputWrapRef} className="shrink-0 bg-background/80 backdrop-blur-sm relative">
+        <div className="absolute -top-12 left-1/2 -translate-x-1/2">
+          <ScrollToBottom containerRef={messagesContainerRef} />
+        </div>
         <div className="max-w-2xl mx-auto px-4 py-3 pb-safe md:pb-3">
           <ChatInput
             ref={chatInputRef}

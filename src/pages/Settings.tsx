@@ -1,9 +1,10 @@
 import { useNavigate } from 'react-router-dom';
-import { ChevronLeft, Moon, Sun, Monitor, Bell, Package } from 'lucide-react';
+import { ChevronLeft, Moon, Sun, Monitor, Bell, Package, Terminal } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { cn } from '@/lib/utils';
 import { api, type PackageUpdate } from '@/lib/api/client';
 import { useTheme } from '@/components/theme/useTheme';
+import { useTerminalSettings, SUGGESTED_FONTS } from '@/hooks/useTerminalSettings';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
@@ -18,6 +19,8 @@ export function Settings() {
   const navigate = useNavigate();
   const { theme, setTheme } = useTheme();
   const { onOpenSidebar } = useOutletContext<LayoutContext>();
+  const { font, setFont, isCustomFont } = useTerminalSettings();
+  const [customFontValue, setCustomFontValue] = useState(isCustomFont ? font : '');
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>('default');
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -142,6 +145,63 @@ export function Settings() {
                   </button>
                 );
               })}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Terminal */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Terminal className="w-4 h-4" />
+              Terminal
+            </CardTitle>
+            <CardDescription>Configure terminal appearance</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Font Family</label>
+              <p className="text-xs text-muted-foreground">
+                Choose a font with Nerd Font icons for best experience. Download from{' '}
+                <a
+                  href="https://www.nerdfonts.com/font-downloads"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-primary hover:underline"
+                >
+                  nerdfonts.com
+                </a>
+              </p>
+              <select
+                value={isCustomFont ? 'Custom' : font}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  if (value === 'Custom') {
+                    setFont(customFontValue || '');
+                  } else {
+                    setFont(value);
+                  }
+                }}
+                className="w-full px-3 py-2 rounded-lg border border-input bg-background text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+              >
+                {SUGGESTED_FONTS.map((f) => (
+                  <option key={f} value={f}>
+                    {f}
+                  </option>
+                ))}
+              </select>
+              {isCustomFont && (
+                <input
+                  type="text"
+                  value={customFontValue}
+                  onChange={(e) => {
+                    setCustomFontValue(e.target.value);
+                    setFont(e.target.value);
+                  }}
+                  placeholder="Enter font name"
+                  className="w-full px-3 py-2 rounded-lg border border-input bg-background text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+              )}
             </div>
           </CardContent>
         </Card>

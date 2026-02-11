@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import { useTheme } from '@/components/theme/useTheme';
+import { api } from '@/lib/api/client';
 import {
   PanelRight,
   FileCode,
@@ -452,6 +453,7 @@ export function GitDiffPanel({
   onClose,
   collapsed = false,
   onToggleCollapse,
+  cwd,
 }: GitDiffPanelProps) {
   const { theme } = useTheme();
   const isDark = theme === 'dark';
@@ -459,7 +461,7 @@ export function GitDiffPanel({
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [diff, setDiff] = useState<GitDiff | null>(null);
   const [loading, setLoading] = useState(false);
-  const [branch] = useState('main');
+  const [branch, setBranch] = useState('main');
   const [commitMessage, setCommitMessage] = useState('');
   const [expandedSections, setExpandedSections] = useState({
     changes: true,
@@ -504,48 +506,72 @@ export function GitDiffPanel({
   }, [isResizing]);
 
   const fetchGitStatus = useCallback(async () => {
+    if (!cwd) return;
     setLoading(true);
-    setFiles([
-      { path: 'src/components/sidebar/index.tsx', status: 'M', staged: true, additions: 45, deletions: 12 },
-      { path: 'package.json', status: 'M', staged: true, additions: 2, deletions: 1 },
-      { path: 'src/components/git-diff/index.tsx', status: 'A', staged: true, additions: 320, deletions: 0 },
-      { path: 'src/App.tsx', status: 'M', staged: false, additions: 23, deletions: 8 },
-      { path: '.env.local', status: '?', staged: false },
-    ]);
-    setLoading(false);
-  }, []);
+    try {
+      const statusFiles = await api.getGitStatus(cwd);
+      const mappedFiles: GitFile[] = statusFiles.map(f => ({
+        path: f.path,
+        status: f.status,
+        staged: f.staged,
+        additions: f.additions,
+        deletions: f.deletions,
+      }));
+      setFiles(mappedFiles);
+      
+      // Fetch branch info
+      try {
+        const gitInfo = await api.getGitInfo(cwd);
+        if (gitInfo.branch) {
+          setBranch(gitInfo.branch);
+        }
+      } catch {
+        // Ignore branch fetch errors
+      }
+    } catch (err) {
+      console.error('Failed to fetch git status:', err);
+      setFiles([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [cwd]);
 
   useEffect(() => {
     fetchGitStatus();
   }, [fetchGitStatus]);
 
   useEffect(() => {
-    if (selectedFile) {
+    if (selectedFile && cwd) {
       const index = files.findIndex(f => f.path === selectedFile);
       setCurrentFileIndex(index >= 0 ? index : 0);
-      setDiff({
-        oldPath: selectedFile,
-        newPath: selectedFile,
-        status: 'M',
-        additions: 45,
-        deletions: 12,
-        diff: `diff --git a/${selectedFile} b/${selectedFile}
-index 1234567..abcdefg 100644
---- a/${selectedFile}
-+++ b/${selectedFile}
-@@ -10,7 +10,7 @@ import { useState } from 'react';
- export function Component() {
-   const [count, setCount] = useState(0);
-   
--  return <div>{count}</div>;
-+  return <div className="p-4">{count}</div>;
- }
- `,
+      
+      const file = files.find(f => f.path === selectedFile);
+      if (!file) return;
+      
+      api.getGitDiff(cwd, selectedFile, file.staged).then(diffText => {
+        setDiff({
+          oldPath: selectedFile,
+          newPath: selectedFile,
+          status: file.status,
+          additions: file.additions || 0,
+          deletions: file.deletions || 0,
+          diff: diffText,
+        });
+      }).catch(err => {
+        console.error('Failed to fetch diff:', err);
+        setDiff({
+          oldPath: selectedFile,
+          newPath: selectedFile,
+          status: file.status,
+          additions: file.additions || 0,
+          deletions: file.deletions || 0,
+          diff: '',
+        });
       });
     } else {
       setDiff(null);
     }
-  }, [selectedFile, files]);
+  }, [selectedFile, files, cwd]);
 
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
@@ -560,28 +586,54 @@ index 1234567..abcdefg 100644
     return () => document.removeEventListener('keydown', handleEscape);
   }, [onClose, isFullscreen]);
 
-  const toggleStage = (e: React.MouseEvent, filePath: string) => {
+  const toggleStage = async (e: React.MouseEvent, filePath: string) => {
     e.stopPropagation();
-    setFiles(prev =>
-      prev.map(f =>
-        f.path === filePath ? { ...f, staged: !f.staged } : f
-      )
-    );
+    if (!cwd) return;
+    
+    const file = files.find(f => f.path === filePath);
+    if (!file) return;
+    
+    try {
+      if (file.staged) {
+        await api.unstageFile(cwd, filePath);
+      } else {
+        await api.stageFile(cwd, filePath);
+      }
+      await fetchGitStatus();
+    } catch (err) {
+      console.error('Failed to toggle stage:', err);
+    }
   };
 
-  const stageAll = () => {
-    setFiles(prev => prev.map(f => ({ ...f, staged: true })));
+  const stageAll = async () => {
+    if (!cwd) return;
+    try {
+      await Promise.all(unstagedFiles.map(f => api.stageFile(cwd!, f.path)));
+      await fetchGitStatus();
+    } catch (err) {
+      console.error('Failed to stage all:', err);
+    }
   };
 
-  const unstageAll = () => {
-    setFiles(prev => prev.map(f => ({ ...f, staged: false })));
+  const unstageAll = async () => {
+    if (!cwd) return;
+    try {
+      await Promise.all(stagedFiles.map(f => api.unstageFile(cwd!, f.path)));
+      await fetchGitStatus();
+    } catch (err) {
+      console.error('Failed to unstage all:', err);
+    }
   };
 
-  const handleCommit = () => {
-    if (!commitMessage.trim()) return;
-    console.log('Committing with message:', commitMessage);
-    setCommitMessage('');
-    fetchGitStatus();
+  const handleCommit = async () => {
+    if (!commitMessage.trim() || !cwd) return;
+    try {
+      await api.commit(cwd, commitMessage);
+      setCommitMessage('');
+      await fetchGitStatus();
+    } catch (err) {
+      console.error('Failed to commit:', err);
+    }
   };
 
   // Navigation functions

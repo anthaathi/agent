@@ -18,8 +18,10 @@ import {
   X,
   PanelLeft,
   RefreshCw,
+  Pin,
 } from 'lucide-react';
 import { useTheme } from '@/components/theme/useTheme';
+import { useSessionManagement } from '@/hooks/useSessionManagement';
 import { NewProjectDialog } from './NewProjectDialog';
 import { Logo } from './Logo';
 import type { SidebarProps, Project, Session, SessionStatus } from './types';
@@ -78,15 +80,21 @@ function groupSessionsByDate(sessions: Session[]): DateGroup[] {
 function SessionItem({
   session,
   isActive,
+  isPinned,
   onClick,
   onRename,
   onDelete,
+  onPin,
+  onUnpin,
 }: {
   session: Session;
   isActive: boolean;
+  isPinned?: boolean;
   onClick: () => void;
   onRename?: (name: string) => void;
   onDelete?: () => void;
+  onPin?: () => void;
+  onUnpin?: () => void;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(session.name);
@@ -155,6 +163,35 @@ function SessionItem({
         'flex items-center gap-0.5 transition-opacity',
         showActions ? 'opacity-100' : 'opacity-0'
       )}>
+        {isPinned ? (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onUnpin?.();
+            }}
+            className={cn(
+              'p-1 rounded opacity-60 hover:opacity-100 transition-opacity',
+              isActive ? 'hover:bg-neutral-900/10 text-amber-500' : 'hover:bg-white/10 text-amber-400'
+            )}
+            title="Unpin"
+          >
+            <Pin className="w-3 h-3 fill-current" />
+          </button>
+        ) : (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onPin?.();
+            }}
+            className={cn(
+              'p-1 rounded opacity-60 hover:opacity-100 transition-opacity',
+              isActive ? 'hover:bg-neutral-900/10' : 'hover:bg-white/10'
+            )}
+            title="Pin"
+          >
+            <Pin className="w-3 h-3" />
+          </button>
+        )}
         <button
           onClick={(e) => {
             e.stopPropagation();
@@ -197,6 +234,9 @@ function ProjectFolder({
   onDeleteSession,
   onLoadSessions,
   isCreatingSession,
+  isSessionPinned,
+  onPinSession,
+  onUnpinSession,
 }: {
   project: Project;
   activeSessionPath?: string;
@@ -208,6 +248,9 @@ function ProjectFolder({
   onDeleteSession?: (sessionPath: string) => void;
   onLoadSessions?: (limit: number, offset: number) => Promise<{ sessions: Session[]; total: number; hasMore: boolean }>;
   isCreatingSession?: boolean;
+  isSessionPinned?: (sessionPath: string) => boolean;
+  onPinSession?: (session: Session) => void;
+  onUnpinSession?: (sessionPath: string) => void;
 }) {
   const hasActiveSession = project.sessions.some((s) => s.sessionPath === activeSessionPath);
   const [isExpanded, setIsExpanded] = useState(hasActiveSession);
@@ -437,9 +480,12 @@ function ProjectFolder({
                         key={session.sessionPath}
                         session={session}
                         isActive={session.sessionPath === activeSessionPath}
+                        isPinned={isSessionPinned?.(session.sessionPath)}
                         onClick={() => onSessionSelect(session.sessionPath)}
                         onRename={(name) => onRenameSession?.(session.sessionPath, name)}
                         onDelete={() => onDeleteSession?.(session.sessionPath)}
+                        onPin={() => onPinSession?.(session)}
+                        onUnpin={() => onUnpinSession?.(session.sessionPath)}
                       />
                     ))}
                   </div>
@@ -500,6 +546,7 @@ export function Sidebar({
   isLoadingProjects = false,
 }: SidebarProps) {
   const { theme, toggleTheme } = useTheme();
+  const { pinnedSessions, pinSession, unpinSession, isPinned } = useSessionManagement();
   const [searchQuery, setSearchQuery] = useState('');
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [visibleCount, setVisibleCount] = useState(PROJECTS_PER_PAGE);
@@ -651,6 +698,35 @@ export function Sidebar({
 
         {/* Projects List */}
         <div className="flex-1 overflow-y-auto overflow-x-hidden py-2">
+          {/* Pinned Sessions */}
+          {!collapsed && pinnedSessions.length > 0 && (
+            <div className="mb-3">
+              <div className="px-3 py-1.5">
+                <span className="text-[10px] font-medium uppercase tracking-wider text-neutral-600">
+                  Pinned
+                </span>
+              </div>
+              {pinnedSessions.map((pinned) => {
+                const project = projects.find(p => p.id === pinned.projectId);
+                const session = project?.sessions.find(s => s.sessionPath === pinned.id);
+                if (!session || !project) return null;
+                return (
+                  <SessionItem
+                    key={pinned.id}
+                    session={session}
+                    isActive={pinned.id === activeSessionPath}
+                    isPinned={true}
+                    onClick={() => onSessionSelect(project.id, pinned.id)}
+                    onRename={(name) => onRenameSession?.(pinned.id, name)}
+                    onDelete={() => onDeleteSession?.(pinned.id)}
+                    onUnpin={() => unpinSession(pinned.id)}
+                  />
+                );
+              })}
+              <div className="mx-3 my-2 border-b border-white/5" />
+            </div>
+          )}
+
           {isLoadingProjects ? (
             // Loading State
             <ProjectsShimmer />
@@ -726,6 +802,13 @@ export function Sidebar({
                   onDeleteSession={onDeleteSession}
                   onLoadSessions={onLoadProjectSessions ? (limit, offset) => onLoadProjectSessions(project.id, limit, offset) : undefined}
                   isCreatingSession={creatingSessionInProject === project.id}
+                  isSessionPinned={isPinned}
+                  onPinSession={(session) => pinSession({
+                    id: session.sessionPath,
+                    title: session.name,
+                    projectId: project.id,
+                  })}
+                  onUnpinSession={unpinSession}
                 />
               ))}
               {hasMore && (

@@ -1,7 +1,10 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import { Outlet, useNavigate, useParams } from 'react-router-dom';
 import { Sidebar, type Project, type Session } from '@/components/sidebar';
 import { GitDiffPanel } from '@/components/git-diff';
+import { CommandPalette } from '@/components/command-palette/CommandPalette';
+import { useCommandPalette } from '@/hooks/useCommandPalette';
+import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { api, type Project as ApiProject, type Session as ApiSession } from '@/lib/api/client';
 
 function mapApiProjectToProject(apiProject: ApiProject): Project {
@@ -37,6 +40,17 @@ export function Layout() {
   const [diffPanelCollapsed, setDiffPanelCollapsed] = useState(false);
   const [creatingSessionInProject, setCreatingSessionInProject] = useState<string | null>(null);
   const [isLoadingProjects, setIsLoadingProjects] = useState(true);
+
+  // Get cwd for active session's project
+  const activeCwd = (() => {
+    if (!activeSessionPath || !projects.length) return undefined;
+    for (const project of projects) {
+      if (project.sessions.some(s => s.sessionPath === activeSessionPath)) {
+        return project.path;
+      }
+    }
+    return undefined;
+  })();
 
   // Sync activeSessionPath with URL
   useEffect(() => {
@@ -196,37 +210,60 @@ export function Layout() {
   }, [activeSessionPath, navigate]);
 
   const handleLoadProjectSessions = useCallback(async (
-    projectId: string, 
-    limit: number, 
+    projectId: string,
+    limit: number,
     offset: number
   ): Promise<{ sessions: Session[]; total: number; hasMore: boolean }> => {
     try {
       const result = await api.loadProjectSessions(projectId, limit, offset);
       const newSessions = mapApiSessions(result.sessions);
-      
+
       // Update project with loaded sessions (deduplicate by path)
       setProjects(prev =>
         prev.map(p => {
           if (p.id !== projectId) return p;
-          
+
           if (offset === 0) {
             // First page - replace all sessions
             return { ...p, sessions: newSessions };
           }
-          
+
           // Subsequent pages - merge and deduplicate
           const existingPaths = new Set(p.sessions.map(s => s.sessionPath));
           const uniqueNewSessions = newSessions.filter(s => !existingPaths.has(s.sessionPath));
           return { ...p, sessions: [...p.sessions, ...uniqueNewSessions] };
         })
       );
-      
+
       return { sessions: newSessions, total: result.total, hasMore: result.hasMore };
     } catch (error) {
       console.error('Failed to load project sessions:', error);
       return { sessions: [], total: 0, hasMore: false };
     }
   }, []);
+
+  // Command palette
+  const allSessions = useMemo(() =>
+    projects.flatMap(p => p.sessions.map(s => ({
+      id: s.sessionPath,
+      title: s.name,
+      projectId: p.id,
+    }))),
+    [projects]
+  );
+
+  const { isOpen: commandPaletteOpen, open: openCommandPalette, close: closeCommandPalette, commands } = useCommandPalette(
+    projects.map(p => ({ id: p.id, name: p.name })),
+    allSessions,
+    undefined,
+    () => setSidebarOpen(true),
+    () => setDiffPanelOpen(prev => !prev)
+  );
+
+  // Keyboard shortcuts
+  useKeyboardShortcuts([
+    { key: 'k', ctrl: true, handler: openCommandPalette },
+  ]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -308,8 +345,15 @@ export function Layout() {
           onClose={() => setDiffPanelOpen(false)}
           collapsed={diffPanelCollapsed}
           onToggleCollapse={() => setDiffPanelCollapsed(!diffPanelCollapsed)}
+          cwd={activeCwd}
         />
       )}
+
+      <CommandPalette
+        isOpen={commandPaletteOpen}
+        onClose={closeCommandPalette}
+        commands={commands}
+      />
     </div>
   );
 }

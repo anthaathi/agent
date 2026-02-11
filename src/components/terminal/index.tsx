@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { init, Terminal, FitAddon, type IDisposable } from 'ghostty-web';
 import { X, Maximize2, Minimize2, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useTerminalSettings, getTerminalFontFamily } from '@/hooks/useTerminalSettings';
 
 type TabStatus = 'connecting' | 'connected' | 'error';
 
@@ -109,6 +110,7 @@ export function TerminalPanel({
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const initPromiseRef = useRef<Promise<void> | null>(null);
   const resizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
+  const { font: terminalFont, fontSize: terminalFontSize } = useTerminalSettings();
 
   const [tabs, setTabs] = useState<TerminalTab[]>(() =>
     persistedStateRef.current.terminalIds.map((id) => ({ id, status: 'connecting' }))
@@ -252,8 +254,8 @@ export function TerminalPanel({
         }
 
         const terminal = new Terminal({
-          fontSize: 14,
-          fontFamily: 'JetBrains Mono, Fira Code, Cascadia Code, Consolas, Monaco, Menlo, monospace',
+          fontSize: terminalFontSize,
+          fontFamily: getTerminalFontFamily(terminalFont),
           cursorBlink: true,
           cursorStyle: 'bar',
           convertEol: true,
@@ -405,7 +407,7 @@ export function TerminalPanel({
     return () => {
       cancelled = true;
     };
-  }, [activeTabId, tabs, sessionPath, ensureTerminalInit, updateTab]);
+  }, [activeTabId, tabs, sessionPath, ensureTerminalInit, updateTab, terminalFont, terminalFontSize]);
 
   useEffect(() => {
     return () => {

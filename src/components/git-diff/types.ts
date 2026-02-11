@@ -22,4 +22,5 @@ export interface GitDiffPanelProps {
   onClose?: () => void;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  cwd?: string;
 }
