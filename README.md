@@ -1,35 +1,43 @@
 # Anthaathi Agent
 
-AI-powered coding assistant interface.
+Web-based AI coding assistant for managing interactive coding sessions with AI agents. Provides a chat interface with integrated terminal, file browser, and git diff viewer.
 
-## Structure
+## Features
 
-```
-├── src/          # React + TypeScript frontend
-├── backend/      # Node.js API server
-└── .env.example  # Environment template
-```
+- Real-time AI chat with streaming responses
+- Integrated terminal for each session
+- Project and session management
+- File browser and git diff viewer
+- Command palette for quick navigation
+- Dark and light theme support
 
-## Quick Start
+## Getting Started
 
+**Prerequisites**
+- Node.js with Yarn 4.x
+- Backend API running on port 3000
+
+**Frontend**
 ```bash
-# Frontend
 yarn install
 yarn dev
+```
 
-# Backend
+**Backend**
+```bash
 cd backend
 yarn install
 yarn dev
 ```
 
-## Environment
+**Configuration**
 
-Copy `.env.example` to `.env.local` and update values:
-
+Copy `.env.example` to `.env.local`:
 ```bash
 cp .env.example .env.local
 ```
+
+Edit `VITE_API_URL` if your backend runs on a different port.
 
 ## License
 
